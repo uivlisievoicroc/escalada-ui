@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Award Ceremony</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" />
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap" rel="stylesheet" />
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#111;color:#fff;font-family:'Bebas Neue',sans-serif}
+#podium{position:absolute;bottom:10%;left:50%;transform:translateX(-50%);display:flex;gap:3vw}
+.spot{width:12vw;height:18vh;border-radius:4px;filter:brightness(.9)}
+#place3{background:#cd7f32;height:12vh}
+#place2{background:#c0c0c0;height:15vh}
+#place1{background:#ffd700;height:18vh}
+#bigName{position:absolute;top:40%;left:50%;transform:translate(-50%,-50%) scale(0);font-size:9vw;white-space:nowrap}
+.hidden{display:none}
+</style>
+</head>
+<body>
+  <div id="podium">
+    <div id="place3" class="spot"></div>
+    <div id="place2" class="spot"></div>
+    <div id="place1" class="spot"></div>
+  </div>
+  <div id="bigName" class="hidden"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3"></script>
+  <script type="module">
+    /* 1. Primește lista de câștigători de la fereastra-mamă */
+    let winners = window.opener?.ceremonyWinners || [];
+    if (!winners.length) {
+      /* fallback – poți trimite și prin postMessage dacă vrei */
+      window.addEventListener('message', e => {
+        if (e.data?.winners) { winners = e.data.winners; init(); }
+      });
+    } else {
+      init();
+    }
+
+    function init() {
+      let step = 0;
+      const nameEl = document.getElementById('bigName');
+      document.addEventListener('keydown', e => e.code === 'Space' && playNext());
+      playNext(); // rulează automat locul 3
+
+      function playNext() {
+        if (step >= winners.length) return;
+        const w = winners[step++];
+        const spot = document.querySelector(`#place${3-step+1}`);
+        nameEl.textContent = w.name;
+        nameEl.style.color = w.color;
+        nameEl.classList.remove('hidden');
+
+        const tl = gsap.timeline();
+        tl.set(nameEl, {scale:0, xPercent:-50, yPercent:-50})
+          .to(nameEl, {scale:1.6, duration:0.6, ease:'back.out(1.6)'})
+          .to(nameEl, {scale:1.9, repeat:4, yoyo:true, duration:0.4}, '<')
+          .to({}, {duration:5}) // pauză 5 s
+          .to(nameEl, {scale:0.3, duration:0.6, ease:'back.in(1.4)'})
+          .to(nameEl, {
+              x:spot.getBoundingClientRect().left - window.innerWidth/2 + spot.offsetWidth/2,
+              y:spot.getBoundingClientRect().top  - window.innerHeight/2 + spot.offsetHeight/2,
+              duration:0.6
+            }, '<')
+          .add(()=>nameEl.classList.add('hidden'));
+      }
+    }
+  </script>
+</body>
+</html>

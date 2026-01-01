@@ -1,0 +1,7 @@
+# Exclude generated/build artifacts and deps
+node_modules/
+dist/
+build/
+coverage/
+.playwright-report/
+.vite/
