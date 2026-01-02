@@ -5,6 +5,7 @@ import { AppStateProvider } from './utilis/useAppState';
 import ControlPanel from './components/ControlPanel';
 import ContestPage from './components/ContestPage';
 import JudgePage from './components/JudgePage';
+import AdminAuditPage from './components/AdminAuditPage';
 
 const App: FC = () => {
   return (
@@ -14,6 +15,7 @@ const App: FC = () => {
           <Route path="/" element={<ControlPanel />} />
           <Route path="/contest/:boxId" element={<ContestPage />} />
           <Route path="/judge/:boxId" element={<JudgePage />} />
+          <Route path="/admin/audit" element={<AdminAuditPage />} />
         </Routes>
       </AppStateProvider>
     </ErrorBoundary>

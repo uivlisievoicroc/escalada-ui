@@ -3,7 +3,6 @@ import { ResizableBox } from 'react-resizable';
 import 'react-resizable/css/styles.css';
 import { useParams } from 'react-router-dom';
 import { debugLog, debugError } from '../utilis/debug';
-import type { Box, Competitor, RankingRow, WebSocketMessage } from '../types';
 import { safeSetItem, safeGetItem, safeRemoveItem } from '../utilis/storage';
 import { sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
 import { getStoredToken } from '../utilis/auth';

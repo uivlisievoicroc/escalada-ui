@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { login } from '../utilis/auth';
 import { debugError } from '../utilis/debug';
 
-const LoginOverlay = ({ onSuccess, defaultUsername }) => {
-  const [username, setUsername] = useState(defaultUsername || '');
+const LoginOverlay = ({ onSuccess, defaultUsername = '' }) => {
+  const [username, setUsername] = useState(defaultUsername);
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);

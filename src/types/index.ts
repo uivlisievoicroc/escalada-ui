@@ -25,10 +25,12 @@ export interface Competitor {
  * Represents a single climbing route/problem with its competitors
  */
 export interface Box {
-  /** Box index (0-based) */
-  idx: number;
-  /** Box/category display name */
-  name: string;
+  /** Box index (0-based) (optional; many screens use array index) */
+  idx?: number;
+  /** Box/category display name (optional; commonly derived from `categorie`) */
+  name?: string;
+  /** Whether the current route has been initiated */
+  initiated?: boolean;
   /** Current route number (1-based) */
   routeIndex: number;
   /** Total number of routes in competition */
@@ -69,6 +71,7 @@ export type CommandType =
   | 'REQUEST_STATE'
   | 'RESET_BOX'
   | 'REQUEST_ACTIVE_COMPETITOR'
+  | 'ACTIVE_CLIMBER'
   | 'SET_TIME_CRITERION'
   | 'TIMER_SYNC';
 

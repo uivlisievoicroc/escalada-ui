@@ -1,5 +1,6 @@
 import QRCode from 'react-qr-code';
 import React, { useState, useEffect, useRef, Suspense, lazy, FC } from 'react';
+import { Link } from 'react-router-dom';
 import { debugLog, debugWarn, debugError } from '../utilis/debug';
 import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
 import { sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
@@ -23,7 +24,9 @@ import ModalModifyScore from './ModalModifyScore';
 import getWinners from '../utilis/getWinners';
 import useWebSocketWithHeartbeat from '../utilis/useWebSocketWithHeartbeat';
 import { normalizeStorageValue } from '../utilis/normalizeStorageValue';
-import { getStoredToken } from '../utilis/auth';
+import { clearAuth, getStoredRole, getStoredToken, setJudgePassword } from '../utilis/auth';
+import { downloadOfficialResultsZip } from '../utilis/backup';
+import LoginOverlay from './LoginOverlay';
 
 // Map boxId -> reference to the opened contest tab
 const openTabs: { [boxId: number]: Window | null } = {};
@@ -98,7 +101,7 @@ const ControlPanel: FC = () => {
     const globalPreset = readClimbingTime();
     if (!saved) return [];
     try {
-      return JSON.parse(saved).map((lb) => ({
+      return JSON.parse(saved).map((lb: Box) => ({
         ...lb,
         timerPreset: lb.timerPreset || globalPreset,
       }));
@@ -115,9 +118,9 @@ const ControlPanel: FC = () => {
   const [activeCompetitor, setActiveCompetitor] = useState<string>('');
   const [showScoreModal, setShowScoreModal] = useState<boolean>(false);
   const [showModifyModal, setShowModifyModal] = useState<boolean>(false);
-  const [editList, setEditList] = useState<Competitor[]>([]);
-  const [editScores, setEditScores] = useState<{ [name: string]: number[] }>({});
-  const [editTimes, setEditTimes] = useState<{ [name: string]: (number | undefined)[] }>({});
+  const [editList, setEditList] = useState<string[]>([]);
+  const [editScores, setEditScores] = useState<Record<string, number>>({});
+  const [editTimes, setEditTimes] = useState<Record<string, number | null | undefined>>({});
   const [currentClimbers, setCurrentClimbers] = useState<{ [boxId: number]: string }>({});
   const [holdClicks, setHoldClicks] = useState<{ [boxId: number]: number }>({});
   const [usedHalfHold, setUsedHalfHold] = useState<{ [boxId: number]: boolean }>({});
@@ -126,8 +129,19 @@ const ControlPanel: FC = () => {
   useEffect(() => {
     registeredTimesRef.current = registeredTimes;
   }, [registeredTimes]);
-  const [rankingStatus, setRankingStatus] = useState<{ [boxId: number]: string }>({});
+  const [rankingStatus, setRankingStatus] = useState<
+    Record<number, { message: string; type: 'info' | 'error' }>
+  >({});
   const [loadingBoxes, setLoadingBoxes] = useState<LoadingBoxes>(new Set()); // TASK 3.1: Track loading operations
+  const [adminToken, setAdminToken] = useState<string | null>(() => getStoredToken());
+  const [adminRole, setAdminRole] = useState<string | null>(() => getStoredRole());
+  const [showAdminLogin, setShowAdminLogin] = useState<boolean>(() => {
+    const t = getStoredToken();
+    const r = getStoredRole();
+    return !(t && r === 'admin');
+  });
+  const [exportBoxId, setExportBoxId] = useState<number>(0);
+  const [judgeQrLinks, setJudgeQrLinks] = useState<Record<number, string>>({});
 
   // Refs pentru a păstra ultima versiune a stărilor
   const listboxesRef = useRef<Box[]>(listboxes);
@@ -153,8 +167,8 @@ const ControlPanel: FC = () => {
   }, [holdClicks]);
 
   // WebSocket: subscribe to each box channel and mirror updates from JudgePage
-  const wsRefs = useRef<{ [boxId: number]: WebSocket }>({});
-  const disconnectFnsRef = useRef<{ [boxId: number]: () => void }>({}); // TASK 2.4: Store disconnect functions for cleanup
+  const wsRefs = useRef<{ [boxId: string]: WebSocket }>({});
+  const disconnectFnsRef = useRef<{ [boxId: string]: () => void }>({}); // TASK 2.4: Store disconnect functions for cleanup
   const syncTimeCriterion = (enabled: boolean): void => {
     setTimeCriterionEnabled(enabled);
     safeSetItem('timeCriterionEnabled', enabled ? 'on' : 'off');
@@ -214,7 +228,7 @@ const ControlPanel: FC = () => {
             return;
           }
           debugLog('📥 WS mesaj primit în ControlPanel:', msg);
-          if (+msg.boxId !== idx) return;
+          if (!('boxId' in msg) || +msg.boxId !== idx) return;
 
           switch (msg.type) {
             case 'START_TIMER':
@@ -228,7 +242,7 @@ const ControlPanel: FC = () => {
               break;
             case 'TIMER_SYNC':
               if (typeof msg.remaining === 'number') {
-                setControlTimers((prev) => ({ ...prev, [idx]: msg.remaining }));
+                setControlTimers((prev) => ({ ...prev, [idx]: Number.isFinite(msg.remaining) ? msg.remaining : 0 }));
               }
               break;
             case 'PROGRESS_UPDATE':
@@ -249,7 +263,17 @@ const ControlPanel: FC = () => {
               break;
             case 'REGISTER_TIME':
               if (typeof msg.registeredTime === 'number') {
-                setRegisteredTimes((prev) => ({ ...prev, [idx]: msg.registeredTime }));
+                if (typeof msg.registeredTime === 'number' && !Number.isNaN(msg.registeredTime)) {
+                  setRegisteredTimes((prev) => {
+                    if (typeof msg.registeredTime === 'number' && !Number.isNaN(msg.registeredTime)) {
+                      return { ...prev, [idx]: msg.registeredTime };
+                    } else {
+                      // Remove the entry if invalid
+                      const { [idx]: _, ...rest } = prev;
+                      return rest;
+                    }
+                  });
+                }
               }
               break;
             case 'REQUEST_STATE':
@@ -302,10 +326,17 @@ const ControlPanel: FC = () => {
                 setCurrentClimbers((prev) => ({ ...prev, [idx]: msg.currentClimber }));
               }
               if (typeof msg.registeredTime === 'number') {
-                setRegisteredTimes((prev) => ({ ...prev, [idx]: msg.registeredTime }));
+                setRegisteredTimes((prev) => {
+                  if (typeof msg.registeredTime === 'number' && !Number.isNaN(msg.registeredTime)) {
+                    return { ...prev, [idx]: msg.registeredTime };
+                  } else {
+                    const { [idx]: _, ...rest } = prev;
+                    return rest;
+                  }
+                });
               }
               if (typeof msg.remaining === 'number') {
-                setControlTimers((prev) => ({ ...prev, [idx]: msg.remaining }));
+                setControlTimers((prev) => ({ ...prev, [idx]: typeof msg.remaining === 'number' && Number.isFinite(msg.remaining) ? msg.remaining : 0 }));
               }
               if (typeof msg.timeCriterionEnabled === 'boolean') {
                 syncTimeCriterion(msg.timeCriterionEnabled);
@@ -328,7 +359,7 @@ const ControlPanel: FC = () => {
           token,
         )}`;
         const ws = new WebSocket(url);
-        let heartbeatInterval = null;
+        let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
         let lastPong = Date.now();
 
         ws.onopen = () => {
@@ -399,8 +430,8 @@ const ControlPanel: FC = () => {
           }, 2000);
         };
 
-        wsRefs.current[idx] = ws;
-        disconnectFnsRef.current[idx] = () => {
+        wsRefs.current[String(idx)] = ws;
+        disconnectFnsRef.current[String(idx)] = () => {
           if (heartbeatInterval) {
             clearInterval(heartbeatInterval);
           }
@@ -416,15 +447,15 @@ const ControlPanel: FC = () => {
       const currentIndices = new Set(listboxes.map((_, idx) => idx));
       Object.keys(wsRefs.current).forEach((idx) => {
         if (!currentIndices.has(parseInt(idx))) {
-          if (disconnectFnsRef.current[idx]) {
-            disconnectFnsRef.current[idx]();
+          if (disconnectFnsRef.current[String(idx)]) {
+            disconnectFnsRef.current[String(idx)]();
           }
-          const ws = wsRefs.current[idx];
+          const ws = wsRefs.current[String(idx)];
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.close();
           }
-          delete wsRefs.current[idx];
-          delete disconnectFnsRef.current[idx];
+          delete wsRefs.current[String(idx)];
+          delete disconnectFnsRef.current[String(idx)];
         }
       });
     };
@@ -459,20 +490,21 @@ const ControlPanel: FC = () => {
   // Ascultă sincronizarea timerelor via localStorage (evenimentul 'storage')
   useEffect(() => {
     // BroadcastChannel pentru comenzi timer (START/STOP/RESUME) din alte ferestre
-    let bcCmd;
-    const handleTimerCmd = (cmd) => {
+    type TimerCmd = { type: 'START_TIMER' | 'STOP_TIMER' | 'RESUME_TIMER'; boxId: number };
+    let bcCmd: BroadcastChannel | undefined;
+    const handleTimerCmd = (cmd: Partial<TimerCmd> | null | undefined) => {
       if (!cmd || typeof cmd.boxId !== 'number') return;
       if (cmd.type === 'START_TIMER')
-        setTimerStates((prev) => ({ ...prev, [cmd.boxId]: 'running' }));
-      if (cmd.type === 'STOP_TIMER') setTimerStates((prev) => ({ ...prev, [cmd.boxId]: 'paused' }));
+        setTimerStates((prev) => ({ ...prev, [Number(cmd.boxId)]: 'running' }));
+      if (cmd.type === 'STOP_TIMER') setTimerStates((prev) => ({ ...prev, [Number(cmd.boxId)]: 'paused' }));
       if (cmd.type === 'RESUME_TIMER')
-        setTimerStates((prev) => ({ ...prev, [cmd.boxId]: 'running' }));
+        setTimerStates((prev) => ({ ...prev, [Number(cmd.boxId)]: 'running' }));
     };
     if ('BroadcastChannel' in window) {
       bcCmd = new BroadcastChannel('timer-cmd');
       bcCmd.onmessage = (ev) => handleTimerCmd(ev.data);
     }
-    const onStorageCmd = (e) => {
+    const onStorageCmd = (e: StorageEvent) => {
       if (!e.key || !e.newValue) return;
       if (!(e.key === storageKey('timer-cmd') || e.key === 'timer-cmd')) return;
       try {
@@ -484,7 +516,7 @@ const ControlPanel: FC = () => {
     };
     window.addEventListener('storage', onStorageCmd);
     // BroadcastChannel (preferat)
-    let bc;
+    let bc: BroadcastChannel | undefined;
     if ('BroadcastChannel' in window) {
       bc = new BroadcastChannel('escalada-timer');
       bc.onmessage = (ev) => {
@@ -497,7 +529,7 @@ const ControlPanel: FC = () => {
         }
       };
     }
-    const onStorageTimer = (e) => {
+    const onStorageTimer = (e: StorageEvent) => {
       if (!e.key || !e.newValue) return;
       const nsPrefix = storageKey('timer-sync-');
       if (!(e.key.startsWith(nsPrefix) || e.key.startsWith('timer-sync-'))) return;
@@ -524,10 +556,11 @@ const ControlPanel: FC = () => {
 
   // Format seconds into "mm:ss"
   const formatTime = (sec: number | null | undefined): string => {
-    const m = Math.floor(sec / 60)
+    const safeSec = typeof sec === 'number' && !isNaN(sec) ? sec : 0;
+    const m = Math.floor(safeSec / 60)
       .toString()
       .padStart(2, '0');
-    const s = (sec % 60).toString().padStart(2, '0');
+    const s = (safeSec % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   };
 
@@ -539,7 +572,7 @@ const ControlPanel: FC = () => {
   };
 
   // convert preset MM:SS în secunde pentru un box
-  const defaultTimerSec = (idx) => {
+  const defaultTimerSec = (idx: number) => {
     const t = getTimerPreset(idx);
     if (!/^\d{1,2}:\d{2}$/.test(t)) return 300;
     const [m, s] = t.split(':').map(Number);
@@ -548,14 +581,18 @@ const ControlPanel: FC = () => {
     return mm * 60 + ss;
   };
 
-  const readCurrentTimerSec = (idx) => {
+  interface ReadCurrentTimerSec {
+    (idx: number): number | null;
+  }
+
+  const readCurrentTimerSec: ReadCurrentTimerSec = (idx) => {
     if (typeof controlTimers[idx] === 'number') return controlTimers[idx];
     const raw = safeGetItem(`timer-${idx}`);
     const parsed = parseInt(raw, 10);
     return Number.isNaN(parsed) ? null : parsed;
   };
 
-  const clearRegisteredTime = (idx) => {
+  const clearRegisteredTime = (idx: number) => {
     setRegisteredTimes((prev) => {
       const { [idx]: _, ...rest } = prev;
       return rest;
@@ -567,7 +604,7 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const handleRegisterTime = (idx) => {
+  const handleRegisterTime = (idx: number) => {
     if (!timeCriterionEnabled) return;
     const current = readCurrentTimerSec(idx);
     if (current == null) {
@@ -583,7 +620,7 @@ const ControlPanel: FC = () => {
 
   useEffect(() => {
     // Inițializare timere din localStorage la încărcare pagină
-    const initial = {};
+    const initial: { [key: number]: number } = {};
     listboxes.forEach((_, idx) => {
       const v = safeGetItem(`timer-${idx}`);
       if (v != null) initial[idx] = parseInt(v);
@@ -591,13 +628,14 @@ const ControlPanel: FC = () => {
     setControlTimers(initial);
 
     // Ascultă evenimentul 'storage' pentru sincronizare
-    const handleStorage = (e) => {
+    const handleStorage = (e: StorageEvent) => {
       if (!e.key) return;
       const nsPrefix = storageKey('timer-');
       if (e.key.startsWith(nsPrefix) || e.key.startsWith('timer-')) {
         const parts = e.key.replace(nsPrefix, 'timer-').split('-');
-        const boxId = parseInt(parts[1]);
-        const remaining = parseInt(e.newValue);
+        const boxId = parseInt(parts[1] || '', 10);
+        const remaining = parseInt(e.newValue ?? '', 10);
+        if (Number.isNaN(boxId) || Number.isNaN(remaining)) return;
         setControlTimers((prev) => ({
           ...prev,
           [boxId]: remaining,
@@ -609,7 +647,7 @@ const ControlPanel: FC = () => {
   }, [listboxes]);
 
   useEffect(() => {
-    const initial = {};
+    const initial: { [boxId: number]: number } = {};
     listboxes.forEach((_, idx) => {
       const raw = safeGetItem(`registeredTime-${idx}`);
       const parsed = parseInt(raw, 10);
@@ -619,12 +657,17 @@ const ControlPanel: FC = () => {
     });
     setRegisteredTimes(initial);
 
-    const onStorageRegistered = (e) => {
+    interface StorageEventWithKey extends StorageEvent {
+      key: string | null;
+      newValue: string | null;
+    }
+
+    const onStorageRegistered = (e: StorageEventWithKey): void => {
       if (!e.key) return;
       const nsPrefix = storageKey('registeredTime-');
       if (!(e.key.startsWith(nsPrefix) || e.key.startsWith('registeredTime-'))) return;
-      const idx = Number(e.key.split('-')[1]);
-      const parsed = parseInt(e.newValue, 10);
+      const idx: number = Number(e.key.split('-')[1]);
+      const parsed: number = parseInt(e.newValue ?? '', 10);
       setRegisteredTimes((prev) => {
         if (Number.isNaN(parsed)) {
           const { [idx]: _, ...rest } = prev;
@@ -638,7 +681,7 @@ const ControlPanel: FC = () => {
   }, [listboxes]);
 
   useEffect(() => {
-    const handleStorageClimber = (e) => {
+    const handleStorageClimber = (e: StorageEvent) => {
       if (!e.key) return;
       const nsPrefix = storageKey('currentClimber-');
       if (!(e.key.startsWith(nsPrefix) || e.key.startsWith('currentClimber-'))) return;
@@ -692,10 +735,10 @@ const ControlPanel: FC = () => {
   }, [timeCriterionEnabled, listboxes]);
 
   useEffect(() => {
-    const onListboxChange = (e) => {
+    const onListboxChange = (e: StorageEvent) => {
       if (e.key === storageKey('listboxes') || e.key === 'listboxes') {
         try {
-          const updated = JSON.parse(e.newValue || '[]');
+          const updated: Box[] = JSON.parse(e.newValue || '[]');
           setListboxes(updated);
         } catch (err) {
           debugError('Failed to parse listboxes from storage', err);
@@ -707,7 +750,7 @@ const ControlPanel: FC = () => {
   }, []);
 
   useEffect(() => {
-    const onStorageToggle = (e) => {
+    const onStorageToggle = (e: StorageEvent) => {
       if (e.key === storageKey('timeCriterionEnabled') || e.key === 'timeCriterionEnabled') {
         setTimeCriterionEnabled(e.newValue === 'on');
       }
@@ -717,10 +760,10 @@ const ControlPanel: FC = () => {
   }, []);
 
   useEffect(() => {
-    const handleMessage = (e) => {
+    const handleMessage = (e: StorageEvent) => {
       if (e.key === storageKey('climb_response') || e.key === 'climb_response') {
         try {
-          const parsed = JSON.parse(e.newValue);
+          const parsed: any = JSON.parse(e.newValue ?? 'null');
           if (parsed.type === 'RESPONSE_ACTIVE_COMPETITOR' && parsed.boxId === activeBoxId) {
             setActiveCompetitor(parsed.competitor);
             setShowScoreModal(true);
@@ -734,15 +777,20 @@ const ControlPanel: FC = () => {
     return () => window.removeEventListener('storage', handleMessage);
   }, [activeBoxId]);
 
-  const handleUpload = (data) => {
+  const handleUpload = (data: {
+    categorie: string;
+    concurenti: Competitor[];
+    routesCount?: number | string;
+    holdsCounts?: Array<number | string>;
+  }) => {
     const { categorie, concurenti, routesCount, holdsCounts } = data;
-    const routesCountNum =
-      Number(routesCount) || (Array.isArray(holdsCounts) ? holdsCounts.length : 0);
+    const routesCountNum = Number(routesCount) || (Array.isArray(holdsCounts) ? holdsCounts.length : 0);
     const holdsCountsNum = Array.isArray(holdsCounts) ? holdsCounts.map((h) => Number(h)) : [];
     const timerPreset = climbingTime || safeGetItem('climbingTime') || '05:00';
     const newIdx = listboxes.length;
+
     setListboxes((prev) => {
-      const next = [
+      const next: Box[] = [
         ...prev,
         {
           categorie,
@@ -762,16 +810,15 @@ const ControlPanel: FC = () => {
       }
       return next;
     });
+
     safeSetItem(`climbingTime-${newIdx}`, timerPreset);
-    // initialize counters for the new box
     setHoldClicks((prev) => ({ ...prev, [newIdx]: 0 }));
     setUsedHalfHold((prev) => ({ ...prev, [newIdx]: false }));
     setTimerStates((prev) => ({ ...prev, [newIdx]: 'idle' }));
-    // close modal if open
     setShowModal(false);
   };
 
-  const handleDelete = async (index) => {
+  const handleDelete = async (index: number): Promise<void> => {
     // Reset backend state to avoid stale snapshots
     try {
       await resetBox(index);
@@ -780,12 +827,12 @@ const ControlPanel: FC = () => {
     }
     // ==================== FIX 2: EXPLICIT WS CLOSE ====================
     // Close WebSocket BEFORE deleting from state to prevent ghost WS
-    const ws = wsRefs.current[index];
+    const ws = wsRefs.current[String(index)];
     if (ws && ws.readyState === WebSocket.OPEN) {
       debugLog(`Closing WebSocket for deleted box ${index}`);
       ws.close(1000, 'Box deleted');
     }
-    delete wsRefs.current[index];
+    delete wsRefs.current[String(index)];
 
     // Optional: clean up tab reference when deleted
     if (openTabs[index] && !openTabs[index].closed) {
@@ -808,7 +855,7 @@ const ControlPanel: FC = () => {
       // ==================== FIX 1: REINDEX BOXVERSION ====================
       // After delete, renumber localStorage keys for all remaining boxes
       // Map old indices to new indices after filter
-      const indexMap = {};
+      const indexMap: Record<number, number> = {};
       let newIdx = 0;
       prev.forEach((_, oldIdx) => {
         if (oldIdx !== index) {
@@ -816,12 +863,12 @@ const ControlPanel: FC = () => {
         }
       });
       // Renumber localStorage keys
-      Object.entries(indexMap).forEach(([oldIdx, newIdx]) => {
-        const oldIdxNum = Number(oldIdx);
-        if (oldIdxNum !== newIdx) {
+      Object.entries(indexMap).forEach(([oldIdxStr, newIdxNum]) => {
+        const oldIdxNum = Number(oldIdxStr);
+        if (Number.isNaN(oldIdxNum) || oldIdxNum === newIdxNum) return;
           // Move boxVersion from old index to new index
           const oldVersionKey = `boxVersion-${oldIdxNum}`;
-          const newVersionKey = `boxVersion-${newIdx}`;
+          const newVersionKey = `boxVersion-${newIdxNum}`;
           const version = safeGetItem(oldVersionKey);
           if (version) {
             safeSetItem(newVersionKey, version);
@@ -829,7 +876,7 @@ const ControlPanel: FC = () => {
           }
           // Move sessionId from old index to new index
           const oldSessionKey = `sessionId-${oldIdxNum}`;
-          const newSessionKey = `sessionId-${newIdx}`;
+          const newSessionKey = `sessionId-${newIdxNum}`;
           const sessionId = safeGetItem(oldSessionKey);
           if (sessionId) {
             safeSetItem(newSessionKey, sessionId);
@@ -838,14 +885,13 @@ const ControlPanel: FC = () => {
           // Move other per-box localStorage keys
           ['timer', 'registeredTime', 'climbingTime', 'ranking', 'rankingTimes'].forEach((key) => {
             const oldKey = `${key}-${oldIdxNum}`;
-            const newKey = `${key}-${newIdx}`;
+            const newKey = `${key}-${newIdxNum}`;
             const value = safeGetItem(oldKey);
             if (value) {
               safeSetItem(newKey, value);
               safeRemoveItem(oldKey);
             }
           });
-        }
       });
 
       return filtered;
@@ -878,7 +924,7 @@ const ControlPanel: FC = () => {
   };
 
   // Reset listbox to its initial state
-  const handleReset = async (index) => {
+  const handleReset = async (index: number): Promise<void> => {
     // NEW: Bounds check for box index
     if (index < 0 || index >= listboxes.length) {
       debugError(`Invalid box index: ${index}`);
@@ -933,20 +979,21 @@ const ControlPanel: FC = () => {
     setCurrentClimbers((prev) => ({ ...prev, [index]: '' }));
   };
 
-  const handleInitiate = (index) => {
+  const handleInitiate = (index: number): void => {
     // 1. Marchează listbox‑ul ca inițiat
     setListboxes((prev) => prev.map((lb, i) => (i === index ? { ...lb, initiated: true } : lb)));
     setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
     clearRegisteredTime(index);
     // 2. Dacă tab‑ul nu există sau s‑a închis → deschide
-    let tab = openTabs[index];
-    if (!isTabAlive(tab)) {
+    const existingTab = openTabs[index];
+    let tab: Window | null = existingTab;
+    if (!isTabAlive(existingTab)) {
       const url = `${window.location.origin}/#/contest/${index}`;
       tab = window.open(url, '_blank');
       if (tab) openTabs[index] = tab;
     } else {
       // tab există: adu‑l în față
-      tab.focus();
+      existingTab?.focus();
     }
 
     // 3. Trimite mesaj de (re)inițiere pentru traseul curent prin HTTP+WS
@@ -960,7 +1007,7 @@ const ControlPanel: FC = () => {
   };
 
   // Advance to the next route on demand
-  const handleNextRoute = (index) => {
+  const handleNextRoute = (index: number): void => {
     // NEW: Bounds check for box index
     if (index < 0 || index >= listboxes.length) {
       debugError(`Invalid box index: ${index}`);
@@ -1013,7 +1060,7 @@ const ControlPanel: FC = () => {
     }
   };
   // --- handlere globale pentru butoane optimiste ------------------
-  const handleClickStart = async (boxIdx) => {
+  const handleClickStart = async (boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     setTimerStates((prev) => ({ ...prev, [boxIdx]: 'running' }));
     clearRegisteredTime(boxIdx);
@@ -1031,7 +1078,7 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const handleClickStop = async (boxIdx) => {
+  const handleClickStop = async (boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     setTimerStates((prev) => ({ ...prev, [boxIdx]: 'paused' }));
     try {
@@ -1048,7 +1095,7 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const handleClickResume = async (boxIdx) => {
+  const handleClickResume = async (boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     setTimerStates((prev) => ({ ...prev, [boxIdx]: 'running' }));
     clearRegisteredTime(boxIdx);
@@ -1066,7 +1113,7 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const handleClickHold = async (boxIdx) => {
+  const handleClickHold = async (boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     try {
       const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
@@ -1087,7 +1134,7 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const handleHalfHoldClick = async (boxIdx) => {
+  const handleHalfHoldClick = async (boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     try {
       const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
@@ -1108,7 +1155,12 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const persistRankingEntry = (boxIdx, competitor, score, registeredTime) => {
+  const persistRankingEntry = (
+    boxIdx: number,
+    competitor: string,
+    score: number,
+    registeredTime: number | string | null | undefined,
+  ): void => {
     if (!competitor) return;
     const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
     const routeIdx = (box?.routeIndex || 1) - 1;
@@ -1132,7 +1184,7 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const handleScoreSubmit = async (score, boxIdx) => {
+  const handleScoreSubmit = async (score: number, boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     const registeredTime = (() => {
       if (!timeCriterionEnabled) return undefined;
@@ -1172,14 +1224,18 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const buildEditLists = (boxIdx) => {
-    const comp = [];
-    const scores = {};
-    const times = {};
+  const buildEditLists = (boxIdx: number): {
+    comp: string[];
+    scores: Record<string, number>;
+    times: Record<string, number | null | undefined>;
+  } => {
+    const comp: string[] = [];
+    const scores: Record<string, number> = {};
+    const times: Record<string, number | null | undefined> = {};
     const box = listboxes[boxIdx];
     const routeIdx = (box?.routeIndex || 1) - 1;
-    let cachedScores = {};
-    let cachedTimes = {};
+    let cachedScores: Record<string, number[]> = {};
+    let cachedTimes: Record<string, (number | null | undefined)[]> = {};
     try {
       cachedScores = JSON.parse(safeGetItem(`ranking-${boxIdx}`) || '{}');
       cachedTimes = JSON.parse(safeGetItem(`rankingTimes-${boxIdx}`) || '{}');
@@ -1201,7 +1257,7 @@ const ControlPanel: FC = () => {
     }
     return { comp, scores, times };
   };
-  const showRankingStatus = (boxIdx, message, type = 'info') => {
+  const showRankingStatus = (boxIdx: number, message: string, type: 'info' | 'error' = 'info') => {
     setRankingStatus((prev) => ({ ...prev, [boxIdx]: { message, type } }));
     setTimeout(() => {
       setRankingStatus((prev) => {
@@ -1211,20 +1267,20 @@ const ControlPanel: FC = () => {
       });
     }, 3000);
   };
-  const handleGenerateRankings = async (boxIdx) => {
+  const handleGenerateRankings = async (boxIdx: number): Promise<void> => {
     const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
     if (!box) return;
-    let ranking = {};
-    let rankingTimes = {};
+    let ranking: Record<string, number[]> = {};
+    let rankingTimes: Record<string, (number | null | undefined)[]> = {};
     try {
       ranking = JSON.parse(safeGetItem(`ranking-${boxIdx}`) || '{}');
       rankingTimes = JSON.parse(safeGetItem(`rankingTimes-${boxIdx}`) || '{}');
     } catch (err) {
       debugError('Failed to read cached rankings for export', err);
     }
-    const clubMap = {};
+    const clubMap: Record<string, string> = {};
     (box.concurenti || []).forEach((c) => {
-      clubMap[c.nume] = c.club;
+      clubMap[c.nume] = c.club ?? '';
     });
     try {
       const config = getApiConfig();
@@ -1247,7 +1303,7 @@ const ControlPanel: FC = () => {
       showRankingStatus(boxIdx, 'Eroare la generare', 'error');
     }
   };
-  const handleCeremony = (category) => {
+  const handleCeremony = (category: string): void => {
     // Open the ceremony window immediately on click
     const win = window.open('/ceremony.html', '_blank', 'width=1920,height=1080');
     if (!win) {
@@ -1258,7 +1314,7 @@ const ControlPanel: FC = () => {
     // Fetch podium from backend
     getWinners(category)
       .then((winners) => {
-        win.ceremonyWinners = winners;
+        (win as any).ceremonyWinners = winners;
       })
       .catch((err) => {
         debugError('Error fetching podium:', err);
@@ -1267,10 +1323,148 @@ const ControlPanel: FC = () => {
       });
   };
 
+  const handleGenerateQr = (boxIdx: number): void => {
+    const cat = listboxes[boxIdx]?.categorie;
+    const params = new URLSearchParams();
+    if (cat) params.set('cat', cat);
+    params.set('reset', '1');
+    const qs = params.toString();
+    const url = `${window.location.origin}/#/judge/${boxIdx}${qs ? `?${qs}` : ''}`;
+    setJudgeQrLinks((prev) => ({ ...prev, [boxIdx]: url }));
+    debugLog('QR generated (login link) for box', boxIdx, 'cat:', cat);
+  };
+
+  const handleSetJudgePassword = async (boxIdx: number): Promise<void> => {
+    if (showAdminLogin || adminRole !== 'admin') {
+      setShowAdminLogin(true);
+      alert('Trebuie să fii logat ca admin pentru a seta parola de judge.');
+      return;
+    }
+
+    const box = listboxes[boxIdx];
+    const username = (box?.categorie || `Box ${boxIdx}`).trim();
+    const pwd = window.prompt(`Setează parola pentru ${username}:`);
+    if (!pwd) return;
+
+    try {
+      await setJudgePassword(boxIdx, pwd, username);
+      alert(`Parola pentru ${username} a fost setată.`);
+    } catch (err: unknown) {
+      debugError('Failed to set judge password', err);
+      if (err instanceof Error && err.message === 'auth_required') {
+        clearAuth();
+        setAdminToken(null);
+        setAdminRole(null);
+        setShowAdminLogin(true);
+        alert('Nu ești autentificat ca admin. Reloghează-te.');
+        return;
+      }
+      alert('Nu am putut seta parola. Verifică dacă ești logat ca admin.');
+    }
+  };
+
+  const handleExportOfficial = async () => {
+    if (showAdminLogin || adminRole !== 'admin') {
+      setShowAdminLogin(true);
+      alert('Trebuie să fii logat ca admin pentru export oficial.');
+      return;
+    }
+    try {
+      await downloadOfficialResultsZip(exportBoxId);
+    } catch (err) {
+      debugError('Failed to export official results ZIP', err);
+      alert('Export oficial eșuat: verifică dacă API este pornit și ești logat ca admin.');
+    }
+  };
+
+  const handleAdminLogout = () => {
+    clearAuth();
+    setAdminToken(null);
+    setAdminRole(null);
+    setShowAdminLogin(true);
+  };
+
+  useEffect(() => {
+    // Keep selected export box in range when list changes
+    if (listboxes.length === 0) return;
+    if (exportBoxId < 0 || exportBoxId >= listboxes.length) {
+      setExportBoxId(0);
+    }
+  }, [listboxes.length, exportBoxId]);
+
+  useEffect(() => {
+    setAdminToken(getStoredToken());
+    setAdminRole(getStoredRole());
+  }, []);
+
   return (
     <div className="p-6">
+      {showAdminLogin && (
+        <LoginOverlay
+          onSuccess={() => {
+            setAdminToken(getStoredToken());
+            setAdminRole(getStoredRole());
+            setShowAdminLogin(false);
+          }}
+        />
+      )}
       <div className="w-full max-w-md mx-auto">
         <h1 className="text-3xl font-bold text-center mb-6">Control Panel</h1>
+        <div className="mb-4 p-3 border border-gray-200 rounded bg-white">
+          <div className="flex items-center justify-between gap-2">
+            <div className="font-semibold">Admin</div>
+            {adminRole === 'admin' ? (
+              <button
+                className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
+                onClick={handleAdminLogout}
+                type="button"
+              >
+                Logout
+              </button>
+            ) : (
+              <button
+                className="px-3 py-1 bg-gray-900 text-white rounded hover:bg-black"
+                onClick={() => setShowAdminLogin(true)}
+                type="button"
+              >
+                Login admin
+              </button>
+            )}
+          </div>
+          <div className="mt-3 flex flex-col gap-2">
+            <label className="text-sm">
+              Box pentru export oficial
+              <select
+                className="mt-1 w-full border border-gray-300 rounded px-2 py-1"
+                value={exportBoxId}
+                onChange={(e) => setExportBoxId(Number(e.target.value))}
+                disabled={listboxes.length === 0}
+              >
+                {listboxes.map((b, idx) => (
+                  <option key={idx} value={idx}>
+                    {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="flex gap-2">
+              <button
+                className="px-3 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50"
+                onClick={handleExportOfficial}
+                disabled={listboxes.length === 0}
+                type="button"
+              >
+                Export oficial (ZIP)
+              </button>
+              <Link
+                className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+                to="/admin/audit"
+              >
+                Audit viewer
+              </Link>
+            </div>
+          </div>
+        </div>
         <div className="flex gap-2 justify-center mb-4">
           <button
             className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
@@ -1294,7 +1488,7 @@ const ControlPanel: FC = () => {
         <ModalTimer
           isOpen={showTimerModal}
           onClose={() => setShowTimerModal(false)}
-          onSet={(time) => {
+          onSet={(time: string) => {
             safeSetItem('climbingTime', time);
             setClimbingTime(time);
           }}
@@ -1303,12 +1497,14 @@ const ControlPanel: FC = () => {
         />
       </div>
 
-      <div className="mt-6 flex flex-nowrap gap-4 overflow-x-auto">
-        {listboxes.map((lb, idx) => {
-          const judgeUrl = `${window.location.origin}/#/judge/${idx}`;
-          const timerState = timerStates[idx] || 'idle';
-          const isRunning = timerState === 'running';
-          const isPaused = timerState === 'paused';
+	      <div className="mt-6 flex flex-nowrap gap-4 overflow-x-auto">
+	        {listboxes.map((lb, idx) => {
+	          const catParam = lb.categorie ? `?cat=${encodeURIComponent(lb.categorie)}` : '';
+	          const baseJudgeUrl = `${window.location.origin}/#/judge/${idx}${catParam}`;
+	          const judgeUrl = judgeQrLinks[idx] || baseJudgeUrl;
+	          const timerState = timerStates[idx] || 'idle';
+	          const isRunning = timerState === 'running';
+	          const isPaused = timerState === 'paused';
           return (
             <details
               key={idx}
@@ -1336,7 +1532,7 @@ const ControlPanel: FC = () => {
                         c.marked ? 'marked-red ' : ''
                       }${isClimbing ? 'bg-yellow-500 text-white animate-pulse ' : ''}py-1 px-2 rounded`}
                     >
-                      {sanitizeCompetitorName(c.nume)} – {sanitizeBoxName(c.club)}
+                      {sanitizeCompetitorName(c.nume)} – {sanitizeBoxName(c.club || '')}
                     </li>
                   );
                 })}
@@ -1500,7 +1696,7 @@ const ControlPanel: FC = () => {
                     maxScore={lb.holdsCount}
                     registeredTime={timeCriterionEnabled ? registeredTimes[idx] : undefined}
                     onClose={() => setShowScoreModal(false)}
-                    onSubmit={(score) => handleScoreSubmit(score, idx)}
+                    onSubmit={(score: number) => handleScoreSubmit(score, idx)}
                   />
                 </Suspense>
 
@@ -1524,9 +1720,9 @@ const ControlPanel: FC = () => {
                   scores={editScores}
                   times={editTimes}
                   onClose={() => setShowModifyModal(false)}
-                  onSubmit={(name, newScore, newTime) => {
+                  onSubmit={(name: string, newScore: number, newTime: number | null) => {
                     persistRankingEntry(idx, name, newScore, newTime);
-                    submitScore(idx, newScore, name, newTime);
+                    submitScore(idx, newScore, name, typeof newTime === 'number' ? newTime : undefined);
                     setShowModifyModal(false);
                   }}
                 />
@@ -1539,21 +1735,37 @@ const ControlPanel: FC = () => {
                   Next Route
                 </button>
 
-                <button
-                  className="px-3 py-1 bg-teal-600 text-white rounded hover:bg-teal-700 disabled:opacity-50"
-                  onClick={() => {
-                    const url = `${window.location.origin}/#/judge/${idx}`;
-                    window.open(url, '_blank');
-                  }}
-                  disabled={!lb.initiated}
-                >
-                  Open Judge View
-                </button>
-
-                <div className="mt-2 flex flex-col items-center">
-                  <span className="text-sm">Judge link</span>
-                  <QRCode value={judgeUrl} size={96} />
-                </div>
+	                <div className="flex flex-col gap-2">
+	                  <button
+	                    className="px-3 py-1 bg-teal-600 text-white rounded hover:bg-teal-700 disabled:opacity-50"
+	                    onClick={() => window.open(baseJudgeUrl, '_blank')}
+	                    disabled={!lb.initiated}
+	                    type="button"
+	                  >
+	                    Open Judge View
+	                  </button>
+	                  <button
+	                    className="px-3 py-1 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
+	                    onClick={() => handleGenerateQr(idx)}
+	                    type="button"
+	                  >
+	                    Generate QR
+	                  </button>
+	                  <button
+	                    className="px-3 py-1 bg-gray-700 text-white rounded hover:bg-gray-800 disabled:opacity-50"
+	                    onClick={() => void handleSetJudgePassword(idx)}
+	                    type="button"
+	                  >
+	                    Set judge password
+	                  </button>
+	                  <div className="mt-2 flex flex-col items-center">
+	                    <span className="text-sm text-center">
+	                      Scan QR și loghează-te cu parola Judge (user ={' '}
+	                      {sanitizeBoxName(lb.categorie || `Box ${idx}`)})
+	                    </span>
+	                    <QRCode value={judgeUrl} size={96} />
+	                  </div>
+	                </div>
 
                 <div className="flex gap-2">
                   <button

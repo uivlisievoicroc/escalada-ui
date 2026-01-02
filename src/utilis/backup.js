@@ -79,3 +79,23 @@ export async function downloadBoxCsv(boxId) {
   a.remove();
   window.URL.revokeObjectURL(url);
 }
+
+export async function downloadOfficialResultsZip(boxId) {
+  const res = await fetchWithRetry(`${API_BASE}/export/official/box/${boxId}`, {
+    method: 'GET',
+    headers: { ...getAuthHeader() },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Official export failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `official_box_${boxId}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}

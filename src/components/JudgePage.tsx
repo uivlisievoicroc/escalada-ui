@@ -11,12 +11,19 @@ import {
   setSessionId,
 } from '../utilis/contestActions';
 import useWebSocketWithHeartbeat from '../utilis/useWebSocketWithHeartbeat';
-import { debugLog, debugError } from '../utilis/debug';
+import { debugLog, debugWarn, debugError } from '../utilis/debug';
 import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
-import { getStoredToken } from '../utilis/auth';
+import {
+  getAuthHeader,
+  getStoredToken,
+  clearAuth,
+  getStoredRole,
+  getStoredBoxes,
+} from '../utilis/auth';
 import type { WebSocketMessage, TimerState, StateSnapshot } from '../types';
 import ModalScore from './ModalScore';
 import ModalModifyScore from './ModalModifyScore';
+import LoginOverlay from './LoginOverlay';
 
 const JudgePage: FC = () => {
   debugLog('🟡 [JudgePage] Component rendering START');
@@ -37,6 +44,8 @@ const JudgePage: FC = () => {
   const [holdCount, setHoldCount] = useState<number>(0);
   const [showScoreModal, setShowScoreModal] = useState<boolean>(false);
   const [maxScore, setMaxScore] = useState<number>(0);
+  const [authToken, setAuthToken] = useState<string | null>(() => getStoredToken());
+  const [showLogin, setShowLogin] = useState<boolean>(() => !getStoredToken());
   const [registeredTime, setRegisteredTime] = useState<number | null>(() => {
     const raw = safeGetItem(`registeredTime-${idx}`);
     const parsed = parseInt(raw, 10);
@@ -55,6 +64,16 @@ const JudgePage: FC = () => {
   // Ref to track snapshot fallback timeout
   const snapshotTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  const forceReauth = useCallback(
+    (reason: string) => {
+      debugWarn('🔐 [JudgePage] Forcing re-auth:', reason);
+      clearAuth();
+      setAuthToken(null);
+      setShowLogin(true);
+    },
+    [setAuthToken, setShowLogin],
+  );
+
   const getTimerPreset = () => {
     const specific = safeGetItem(`climbingTime-${idx}`);
     const global = safeGetItem('climbingTime');
@@ -71,7 +90,11 @@ const JudgePage: FC = () => {
     return presetToSec(getTimerPreset());
   };
 
-  const applyTimerPresetSnapshot = useCallback((snapshot: StateSnapshot | null) => {
+  type TimerPresetCarrier = Pick<StateSnapshot, 'timerPreset' | 'timerPresetSec'> & {
+    [key: string]: any;
+  };
+
+  const applyTimerPresetSnapshot = useCallback((snapshot: TimerPresetCarrier | null) => {
     if (!snapshot) return;
     if (typeof snapshot.timerPresetSec === 'number') {
       setServerTimerPresetSec(snapshot.timerPresetSec);
@@ -86,9 +109,7 @@ const JudgePage: FC = () => {
   }, []);
 
   // WebSocket subscription to backend for real-time updates
-  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>(
-    'connecting',
-  );
+  const [wsStatus, setWsStatus] = useState<'connecting' | 'open' | 'closed'>('connecting');
   const [showWsBanner, setShowWsBanner] = useState<boolean>(true);
 
   const clearRegisteredTime = useCallback(() => {
@@ -108,7 +129,7 @@ const JudgePage: FC = () => {
     }`;
     debugLog('🟡 [JudgePage] WS_URL memoized:', url);
     return url;
-  }, [idx, WS_PROTOCOL]);
+  }, [idx, WS_PROTOCOL, authToken]);
 
   // Message handler for all incoming WS messages
   const handleWsMessage = useCallback(
@@ -128,6 +149,7 @@ const JudgePage: FC = () => {
         }
         return;
       }
+      if (!('boxId' in msg)) return;
       if (+msg.boxId !== idx) return;
 
       if (msg.type === 'INIT_ROUTE') {
@@ -232,10 +254,14 @@ const JudgePage: FC = () => {
 
   // Initialize WebSocket hook at top level with memoized URL
   debugLog('🟡 [JudgePage] About to call useWebSocketWithHeartbeat with wsUrl:', WS_URL);
-  const { ws, connected, wsError } = useWebSocketWithHeartbeat(WS_URL, (m) => {
+  const { ws, connected, wsError } = useWebSocketWithHeartbeat(WS_URL, (m: WebSocketMessage) => {
     debugLog('🟢 [JudgePage] WS message received:', m.type);
     handleWsMessage(m);
-  });
+  }) as {
+    ws: WebSocket | null;
+    connected: boolean;
+    wsError: string;
+  };
   debugLog('🟡 [JudgePage] Hook returned, connected:', connected, 'ws:', ws ? 'exists' : 'null');
   // Track WS open/close to update banner and trigger resync
   useEffect(() => {
@@ -258,8 +284,14 @@ const JudgePage: FC = () => {
       snapshotTimeoutRef.current = setTimeout(() => {
         debugWarn('📗 [JudgePage] No STATE_SNAPSHOT received in 2s, fetching via HTTP');
 
-        fetch(`${API_BASE}/api/state/${idx}`)
-          .then((res) => (res.ok ? res.json() : null))
+        fetch(`${API_BASE}/api/state/${idx}`, { headers: { ...getAuthHeader() } })
+          .then((res) => {
+            if (res.status === 401 || res.status === 403) {
+              forceReauth(`http_state_fallback_${res.status}`);
+              return null;
+            }
+            return res.ok ? res.json() : null;
+          })
           .then((st) => {
             if (!st) return;
             debugLog('📗 [JudgePage] Applied fallback HTTP state:', st);
@@ -278,7 +310,13 @@ const JudgePage: FC = () => {
           .catch((err) => debugError('📗 [JudgePage] Failed to fetch fallback state:', err));
       }, 2000);
     };
-    const handleClose = (): void => setWsStatus('closed');
+    const handleClose = (evt: CloseEvent): void => {
+      setWsStatus('closed');
+      if (evt?.code === 4401 || evt?.code === 4403) {
+        forceReauth(evt.reason || `ws_close_${evt.code}`);
+      }
+    };
+    const handleError = (): void => setWsStatus('closed');
 
     // If socket is already open, call handleOpen immediately (in case open event already fired)
     if (ws.readyState === WebSocket.OPEN) {
@@ -292,13 +330,13 @@ const JudgePage: FC = () => {
 
     ws.addEventListener('open', handleOpen);
     ws.addEventListener('close', handleClose);
-    ws.addEventListener('error', handleClose);
+    ws.addEventListener('error', handleError);
     return () => {
       ws.removeEventListener('open', handleOpen);
       ws.removeEventListener('close', handleClose);
-      ws.removeEventListener('error', handleClose);
+      ws.removeEventListener('error', handleError);
     };
-  }, [ws, API_BASE, idx, applyTimerPresetSnapshot]);
+  }, [ws, API_BASE, idx, applyTimerPresetSnapshot, forceReauth]);
 
   const formatTime = (sec: number | null): string => {
     if (typeof sec !== 'number' || Number.isNaN(sec)) return '—';
@@ -323,7 +361,13 @@ const JudgePage: FC = () => {
         // Re-fetch state from server to sync with new version
         (async () => {
           try {
-            const res = await fetch(`${API_BASE}/api/state/${idx}`);
+            const res = await fetch(`${API_BASE}/api/state/${idx}`, {
+              headers: { ...getAuthHeader() },
+            });
+            if (res.status === 401 || res.status === 403) {
+              forceReauth(`http_state_refresh_${res.status}`);
+              return;
+            }
             if (res.ok) {
               const st = await res.json();
               setInitiated(st.initiated);
@@ -342,13 +386,42 @@ const JudgePage: FC = () => {
 
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
-  }, [idx, API_BASE]);
+  }, [idx, API_BASE, forceReauth]);
+
+  // Force reset if link has reset=1 (useful when QR should trigger fresh login)
+  useEffect(() => {
+    const paramsSearch = new URLSearchParams(window.location.search);
+    let resetFlag = paramsSearch.get('reset');
+    if (!resetFlag && window.location.hash && window.location.hash.includes('?')) {
+      const [, qs] = window.location.hash.split('?');
+      resetFlag = new URLSearchParams(qs).get('reset');
+    }
+    if (resetFlag === '1') {
+      forceReauth('reset=1');
+    }
+  }, [forceReauth]);
+
+  // If token exists but is wrong role/box, force re-auth
+  useEffect(() => {
+    const role = getStoredRole();
+    const boxes = getStoredBoxes();
+    if (role !== 'judge' || !boxes.includes(idx)) {
+      forceReauth('role_or_box_mismatch');
+    }
+  }, [idx, forceReauth]);
 
   // Fetch initial state snapshot on mount
   useEffect(() => {
+    if (!authToken) return;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/state/${idx}`);
+        const res = await fetch(`${API_BASE}/api/state/${idx}`, {
+          headers: { ...getAuthHeader() },
+        });
+        if (res.status === 401 || res.status === 403) {
+          forceReauth(`http_state_init_${res.status}`);
+          return;
+        }
         if (res.ok) {
           const st = await res.json();
           if (st.sessionId) setSessionId(idx, st.sessionId);
@@ -367,7 +440,7 @@ const JudgePage: FC = () => {
         debugError('Error fetching initial state:', e);
       }
     })();
-  }, [idx, API_BASE, applyTimerPresetSnapshot]);
+  }, [idx, API_BASE, applyTimerPresetSnapshot, authToken, forceReauth]);
 
   useEffect(() => {
     const syncFromStorage = () => {
@@ -382,11 +455,11 @@ const JudgePage: FC = () => {
     syncFromStorage();
     const onStorage = (e: StorageEvent) => {
       if (e.key === storageKey(`timer-${idx}`) || e.key === `timer-${idx}`) {
-        const parsed = parseInt(e.newValue, 10);
+        const parsed = parseInt(e.newValue ?? '', 10);
         setTimerSeconds(Number.isNaN(parsed) ? null : parsed);
       }
       if (e.key === storageKey(`registeredTime-${idx}`) || e.key === `registeredTime-${idx}`) {
-        const parsed = parseInt(e.newValue, 10);
+        const parsed = parseInt(e.newValue ?? '', 10);
         setRegisteredTime(Number.isNaN(parsed) ? null : parsed);
       }
       if (e.key === storageKey('timeCriterionEnabled') || e.key === 'timeCriterionEnabled') {
@@ -416,7 +489,13 @@ const JudgePage: FC = () => {
   const pullLatestState = async (): Promise<void> => {
     let snapshot: any = {};
     try {
-      const res = await fetch(`${API_BASE}/api/state/${idx}`);
+      const res = await fetch(`${API_BASE}/api/state/${idx}`, {
+        headers: { ...getAuthHeader() },
+      });
+      if (res.status === 401 || res.status === 403) {
+        forceReauth(`http_state_latest_${res.status}`);
+        return;
+      }
       if (res.ok) {
         snapshot = await res.json();
         applyTimerPresetSnapshot(snapshot);
@@ -514,6 +593,37 @@ const JudgePage: FC = () => {
   const isRunning = timerState === 'running';
   const isPaused = timerState === 'paused';
 
+  // Prefer categoria transmisă în URL (din QR); fallback la listbox din localStorage; altfel Box {id}
+  const defaultJudgeUsername = useMemo(() => {
+    const readCatFromUrl = () => {
+      let cat: string | null = null;
+      const fromSearch = new URLSearchParams(window.location.search).get('cat');
+      if (fromSearch) cat = fromSearch;
+      else if (window.location.hash && window.location.hash.includes('?')) {
+        const [, qs] = window.location.hash.split('?');
+        cat = new URLSearchParams(qs).get('cat');
+      }
+      return cat && cat.trim() ? cat.trim() : null;
+    };
+
+    const catFromUrl = readCatFromUrl();
+    if (catFromUrl) return catFromUrl;
+
+    try {
+      const raw = safeGetItem('listboxes');
+      if (raw) {
+        const arr = JSON.parse(raw);
+        const cat = arr?.[idx]?.categorie;
+        if (typeof cat === 'string' && cat.trim()) {
+          return cat.trim();
+        }
+      }
+    } catch (err) {
+      debugError('Failed to read listboxes for default judge username', err);
+    }
+    return `Box ${idx}`;
+  }, [idx]);
+
   // Debounce banner: show only if non-open state persists > 1s
   useEffect(() => {
     if (wsStatus === 'open') {
@@ -527,147 +637,171 @@ const JudgePage: FC = () => {
   }, [wsStatus]);
 
   return (
-    <div className="p-20 flex flex-col gap-2">
-      {showWsBanner && wsStatus !== 'open' && (
-        <div className="mb-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
-          WS: {wsStatus}.{' '}
-          {wsError ? `(${wsError})` : 'Check host IP and that port 8000 is reachable.'}
-        </div>
+    <>
+      {showLogin && (
+        <LoginOverlay
+          defaultUsername={defaultJudgeUsername}
+          onSuccess={() => {
+            setAuthToken(getStoredToken());
+            setShowLogin(false);
+            pullLatestState();
+          }}
+        />
       )}
-      {!isRunning && !isPaused && (
-        <button
-          className="px-3 py-1 bg-blue-600 text-white rounded disabled:opacity-50"
-          onClick={handleStartTime}
-          disabled={!initiated}
-        >
-          Start Time
-        </button>
-      )}
-      {isRunning && (
-        <button
-          className="px-3 py-1 bg-red-600 text-white rounded disabled:opacity-50"
-          onClick={handleStopTime}
-          disabled={!initiated}
-        >
-          Stop Time
-        </button>
-      )}
-      {isPaused && (
-        <div className="flex gap-2">
+      <div className="p-20 flex flex-col gap-2">
+        {showWsBanner && wsStatus !== 'open' && (
+          <div className="mb-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
+            WS: {wsStatus}.{' '}
+            {wsError ? `(${wsError})` : 'Check host IP and that port 8000 is reachable.'}
+          </div>
+        )}
+        {!isRunning && !isPaused && (
           <button
             className="px-3 py-1 bg-blue-600 text-white rounded disabled:opacity-50"
-            onClick={handleResumeTime}
+            onClick={handleStartTime}
             disabled={!initiated}
           >
-            Resume Time
+            Start Time
+          </button>
+        )}
+        {isRunning && (
+          <button
+            className="px-3 py-1 bg-red-600 text-white rounded disabled:opacity-50"
+            onClick={handleStopTime}
+            disabled={!initiated}
+          >
+            Stop Time
+          </button>
+        )}
+        {isPaused && (
+          <div className="flex gap-2">
+            <button
+              className="px-3 py-1 bg-blue-600 text-white rounded disabled:opacity-50"
+              onClick={handleResumeTime}
+              disabled={!initiated}
+            >
+              Resume Time
+            </button>
+            <button
+              className="px-3 py-1 bg-gray-500 text-white rounded disabled:opacity-50"
+              onClick={handleRegisterTime}
+              disabled={!initiated || !timeCriterionEnabled}
+            >
+              Register Time
+            </button>
+          </div>
+        )}
+        {isPaused && timeCriterionEnabled && registeredTime !== null && (
+          <div className="text-xs text-gray-700">Registered: {formatTime(registeredTime)}</div>
+        )}
+        <div className="flex gap-2">
+          <button
+            className="mt-10 px-12 py-12 bg-purple-600 text-white rounded hover:bg-purple-700 active:scale-95 transition flex flex-col items-center disabled:opacity-50"
+            onClick={handleHoldClick}
+            disabled={
+              !initiated ||
+              !isRunning ||
+              (Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0))
+            }
+            title={
+              Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0)
+                ? 'Top reached! Climber cannot climb over the top :)'
+                : 'Add 1 hold'
+            }
+          >
+            <div className="flex flex-col items-center">
+              <span className="text-xs font-medium">{currentClimber || ''}</span>
+              <span>+1 Hold</span>
+              <span className="text-sm">
+                Score {holdCount} → {maxScore}
+              </span>
+            </div>
           </button>
           <button
-            className="px-3 py-1 bg-gray-500 text-white rounded disabled:opacity-50"
-            onClick={handleRegisterTime}
-            disabled={!initiated || !timeCriterionEnabled}
+            className="mt-10 px-4 py-5 bg-purple-600 text-white rounded hover:bg-purple-700 active:scale-95 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={handleHalfHoldClick}
+            disabled={
+              !initiated ||
+              !isRunning ||
+              usedHalfHold ||
+              (Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0))
+            }
+            title={
+              Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0)
+                ? 'Top reached! Climber cannot climb over the top :)'
+                : 'Add 0.1 hold'
+            }
           >
-            Register Time
+            + .1
           </button>
         </div>
-      )}
-      {isPaused && timeCriterionEnabled && registeredTime !== null && (
-        <div className="text-xs text-gray-700">Registered: {formatTime(registeredTime)}</div>
-      )}
-      <div className="flex gap-2">
         <button
-          className="mt-10 px-12 py-12 bg-purple-600 text-white rounded hover:bg-purple-700 active:scale-95 transition flex flex-col items-center disabled:opacity-50"
-          onClick={handleHoldClick}
-          disabled={
-            !initiated ||
-            !isRunning ||
-            (Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0))
-          }
-          title={
-            Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0)
-              ? 'Top reached! Climber cannot climb over the top :)'
-              : 'Add 1 hold'
-          }
+          className="mt-10 px-3 py-1 bg-yellow-500 text-white rounded"
+          onClick={handleInsertScore}
+          disabled={!initiated || (!isRunning && !isPaused)}
         >
-          <div className="flex flex-col items-center">
-            <span className="text-xs font-medium">{currentClimber || ''}</span>
-            <span>+1 Hold</span>
-            <span className="text-sm">
-              Score {holdCount} → {maxScore}
-            </span>
-          </div>
+          Insert Score
         </button>
-        <button
-          className="mt-10 px-4 py-5 bg-purple-600 text-white rounded hover:bg-purple-700 active:scale-95 transition disabled:opacity-50 disabled:cursor-not-allowed"
-          onClick={handleHalfHoldClick}
-          disabled={
-            !initiated ||
-            !isRunning ||
-            usedHalfHold ||
-            (Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0))
-          }
-          title={
-            Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0)
-              ? 'Top reached! Climber cannot climb over the top :)'
-              : 'Add 0.1 hold'
-          }
-        >
-          + .1
-        </button>
-      </div>
-      <button
-        className="mt-10 px-3 py-1 bg-yellow-500 text-white rounded"
-        onClick={handleInsertScore}
-        disabled={!initiated || (!isRunning && !isPaused)}
-      >
-        Insert Score
-      </button>
-      <ModalScore
-        isOpen={showScoreModal}
-        competitor={currentClimber}
-        initialScore={holdCount}
-        maxScore={maxScore}
-        registeredTime={timeCriterionEnabled ? registeredTime : undefined}
-        onClose={() => setShowScoreModal(false)}
-        onSubmit={async (score) => {
-          let timeToSend;
-          if (timeCriterionEnabled) {
-            if (typeof registeredTime === 'number') {
-              timeToSend = registeredTime;
-            } else {
-              const raw = safeGetItem(`registeredTime-${idx}`);
-              const parsed = parseInt(raw, 10);
-              if (!Number.isNaN(parsed)) {
-                timeToSend = parsed;
+        <ModalScore
+          isOpen={showScoreModal}
+          competitor={currentClimber}
+          initialScore={holdCount}
+          maxScore={maxScore}
+          registeredTime={timeCriterionEnabled ? registeredTime : undefined}
+          onClose={() => setShowScoreModal(false)}
+          onSubmit={async (score: number) => {
+            let timeToSend: number | null = null;
+            if (timeCriterionEnabled) {
+              if (typeof registeredTime === 'number') {
+                timeToSend = registeredTime;
               } else {
-                const current = await resolveRemainingSeconds();
-                if (current != null && !Number.isNaN(current)) {
-                  const elapsed = Math.max(0, totalDurationSec() - current);
-                  timeToSend = elapsed;
-                  try {
-                    safeSetItem(`registeredTime-${idx}`, elapsed.toString());
-                  } catch (err) {
-                    debugError('Failed to persist computed registered time', err);
+                const raw = safeGetItem(`registeredTime-${idx}`);
+                const parsed = parseInt(raw, 10);
+                if (!Number.isNaN(parsed)) {
+                  timeToSend = parsed;
+                } else {
+                  const current = await resolveRemainingSeconds();
+                  if (current != null && !Number.isNaN(current)) {
+                    const elapsed = Math.max(0, totalDurationSec() - current);
+                    timeToSend = elapsed;
+                    try {
+                      safeSetItem(`registeredTime-${idx}`, elapsed.toString());
+                    } catch (err) {
+                      debugError('Failed to persist computed registered time', err);
+                    }
+                    setRegisteredTime(elapsed);
                   }
-                  setRegisteredTime(elapsed);
                 }
               }
             }
-          }
-          await submitScore(idx, score, currentClimber, timeToSend);
-          clearRegisteredTime();
-          setShowScoreModal(false);
-          const boxes = JSON.parse(safeGetItem('listboxes') || '[]');
-          const box = boxes?.[idx];
-          if (box?.concurenti) {
-            const competitorIdx = box.concurenti.findIndex((c) => c.nume === currentClimber);
-            if (competitorIdx !== -1) {
-              box.concurenti[competitorIdx].marked = true;
-              safeSetItem('listboxes', JSON.stringify(boxes));
+            await submitScore(
+              idx,
+              score,
+              currentClimber,
+              typeof timeToSend === 'number' ? timeToSend : undefined,
+            );
+            clearRegisteredTime();
+            setShowScoreModal(false);
+            interface Competitor {
+              nume: string;
+              marked?: boolean;
             }
-          }
-        }}
-      />
-    </div>
+            interface Box {
+              concurenti?: Competitor[];
+            }
+            const boxes: Box[] = JSON.parse(safeGetItem('listboxes') || '[]');
+            const box = boxes?.[idx];
+            if (box?.concurenti) {
+              const competitorIdx = box.concurenti.findIndex((c) => c.nume === currentClimber);
+              if (competitorIdx !== -1) {
+                box.concurenti[competitorIdx].marked = true;
+                safeSetItem('listboxes', JSON.stringify(boxes));
+              }
+            }
+          }}
+        />
+      </div>
+    </>
   );
 };
 

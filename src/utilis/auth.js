@@ -7,7 +7,14 @@ const TOKEN_KEY = 'authToken';
 const ROLE_KEY = 'authRole';
 const BOXES_KEY = 'authBoxes';
 
-export const getStoredToken = () => safeGetItem(TOKEN_KEY);
+const _normalizeStoredString = (v) => {
+  if (v == null) return null;
+  if (v === '' || v === 'null' || v === 'undefined') return null;
+  return v;
+};
+
+export const getStoredToken = () => _normalizeStoredString(safeGetItem(TOKEN_KEY));
+/** @returns {Record<string, string>} */
 export const getAuthHeader = () => {
   const token = getStoredToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -50,11 +57,12 @@ export const clearAuth = () => {
   safeRemoveItem(BOXES_KEY);
 };
 
-export const getStoredRole = () => safeGetItem(ROLE_KEY);
+export const getStoredRole = () => _normalizeStoredString(safeGetItem(ROLE_KEY));
 export const getStoredBoxes = () => {
   try {
     const raw = safeGetItem(BOXES_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const normalized = _normalizeStoredString(raw);
+    return normalized ? JSON.parse(normalized) : [];
   } catch {
     return [];
   }

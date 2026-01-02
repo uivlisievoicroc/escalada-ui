@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import React from 'react';
-import ControlPanel from '../components/ControlPanel.jsx';
+import { MemoryRouter } from 'react-router-dom';
+import ControlPanel from '../components/ControlPanel';
 
 function seedLocalStorageForTwoBoxes() {
   const listboxes = [
@@ -58,7 +59,11 @@ describe('ControlPanel button flows', () => {
   });
 
   it('sends PROGRESS_UPDATE when clicking +1 Hold for each listbox', async () => {
-    render(<ControlPanel />);
+    render(
+      <MemoryRouter>
+        <ControlPanel />
+      </MemoryRouter>,
+    );
 
     // Start both boxes to enable +1 Hold
     const startButtons = await screen.findAllByText('Start Time');
@@ -88,7 +93,11 @@ describe('ControlPanel button flows', () => {
   });
 
   it('registers time after Stop and shows Registered text', async () => {
-    render(<ControlPanel />);
+    render(
+      <MemoryRouter>
+        <ControlPanel />
+      </MemoryRouter>,
+    );
 
     // Start then Stop for box 0 to enter paused state
     const startButtons = await screen.findAllByText('Start Time');

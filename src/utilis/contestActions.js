@@ -246,7 +246,7 @@ export async function requestActiveCompetitor(boxId) {
  * @param {number} boxId - Box identifier
  * @param {number} score - Final score (holds)
  * @param {string} competitor - Competitor name
- * @param {number} registeredTime - Registered time in seconds
+ * @param {number | undefined} [registeredTime] - Registered time in seconds (optional)
  * @throws {Error} If API request fails
  */
 export async function submitScore(boxId, score, competitor, registeredTime) {
