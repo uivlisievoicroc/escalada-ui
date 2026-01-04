@@ -31,7 +31,8 @@ describe('AppStateProvider and useAppState Hook', () => {
     expect(capturedState.listboxes).toBeDefined();
     expect(Array.isArray(capturedState.listboxes)).toBe(true);
     expect(capturedState.climbingTime).toBe('05:00');
-    expect(capturedState.timeCriterionEnabled).toBe(false);
+    expect(capturedState.timeCriterionByBox).toEqual({});
+    expect(capturedState.getTimeCriterionEnabled(0)).toBe(false);
   });
 
   it('should throw error when used outside provider', () => {

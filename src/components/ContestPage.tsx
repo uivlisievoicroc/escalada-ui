@@ -3,7 +3,7 @@ import { ResizableBox } from 'react-resizable';
 import 'react-resizable/css/styles.css';
 import { useParams } from 'react-router-dom';
 import { debugLog, debugError } from '../utilis/debug';
-import { safeSetItem, safeGetItem, safeRemoveItem } from '../utilis/storage';
+import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
 import { sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
 import { getStoredToken } from '../utilis/auth';
 import type { Box, Competitor, RankingRow, WebSocketMessage } from '../types';
@@ -34,7 +34,6 @@ interface TimesByName {
 interface RankInfo {
   nume: string;
   score: number;
-  time?: number;
 }
 
 interface TimerMessage {
@@ -144,18 +143,11 @@ const RouteProgress: FC<RouteProgressProps> = ({
 /** Returnează { [nume]: [rankPoints…] } şi numărul total de concurenţi */
 const calcRankPointsPerRoute = (
   scoresByName: ScoresByName,
-  timesByName: TimesByName,
   routeIdx: number,
-  useTimeTiebreak: boolean,
 ): { rankPoints: { [name: string]: (number | undefined)[] }; nCompetitors: number } => {
   const rankPoints: { [name: string]: (number | undefined)[] } = {};
   const nRoutes = routeIdx; // câte rute am până acum
   let nCompetitors = 0;
-
-  const getTimeFor = (name: string, r: number): number | undefined =>
-    timesByName && timesByName[name] && timesByName[name][r] !== undefined
-      ? timesByName[name][r]
-      : undefined;
 
   // pentru fiecare rută (0‑based)
   for (let r = 0; r < nRoutes; r++) {
@@ -165,17 +157,12 @@ const calcRankPointsPerRoute = (
       .map(([nume, arr]) => ({
         nume,
         score: arr[r],
-        time: getTimeFor(nume, r),
       }));
 
     // sortează descrescător
     list.sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
-      if (!useTimeTiebreak) return 0;
-      const ta = typeof a.time === 'number' ? a.time : Infinity;
-      const tb = typeof b.time === 'number' ? b.time : Infinity;
-      if (ta !== tb) return ta - tb; // timp mai mic = mai bun
-      return 0;
+      return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
     });
 
     // parcurge şi atribuie rank‑ul cu tie‑handling
@@ -183,13 +170,7 @@ const calcRankPointsPerRoute = (
     for (let i = 0; i < list.length; ) {
       const current = list[i];
       let j = i;
-      while (
-        j < list.length &&
-        list[j].score === current.score &&
-        (!useTimeTiebreak ||
-          (typeof list[j].time === 'number' ? list[j].time : Infinity) ===
-            (typeof current.time === 'number' ? current.time : Infinity))
-      ) {
+      while (j < list.length && list[j].score === current.score) {
         j++;
       }
       const tieCount = j - i;
@@ -229,8 +210,24 @@ const ContestPage: FC = () => {
     const global = safeGetItem('climbingTime');
     return specific || global || '05:00';
   }, [boxId]);
+  const parseTimeCriterionValue = (raw: string | null): boolean | null => {
+    if (raw === 'on') return true;
+    if (raw === 'off') return false;
+    if (!raw) return null;
+    try {
+      return !!JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+  const readTimeCriterionEnabled = useCallback((): boolean => {
+    const perBox = parseTimeCriterionValue(safeGetItem(`timeCriterionEnabled-${boxId}`));
+    if (perBox !== null) return perBox;
+    const legacy = parseTimeCriterionValue(safeGetItem('timeCriterionEnabled'));
+    return legacy ?? false;
+  }, [boxId]);
   const [timeCriterionEnabled, setTimeCriterionEnabled] = useState<boolean>(
-    () => safeGetItem('timeCriterionEnabled') === 'on',
+    () => readTimeCriterionEnabled(),
   );
 
   // --- Broadcast channel pentru sincronizare timere ---
@@ -259,6 +256,20 @@ const ContestPage: FC = () => {
     }`;
 
     const handleMessage = (msg: WebSocketMessage) => {
+      if (msg.type === 'STATE_SNAPSHOT') {
+        if (+msg.boxId !== Number(boxId)) return;
+        if (typeof msg.timeCriterionEnabled === 'boolean') {
+          setTimeCriterionEnabled(msg.timeCriterionEnabled);
+          safeSetItem(`timeCriterionEnabled-${boxId}`, msg.timeCriterionEnabled ? 'on' : 'off');
+        }
+      }
+      if (msg.type === 'SET_TIME_CRITERION') {
+        if (+msg.boxId !== Number(boxId)) return;
+        if (typeof msg.timeCriterionEnabled === 'boolean') {
+          setTimeCriterionEnabled(msg.timeCriterionEnabled);
+          safeSetItem(`timeCriterionEnabled-${boxId}`, msg.timeCriterionEnabled ? 'on' : 'off');
+        }
+      }
       if (msg.type === 'INIT_ROUTE') {
         const { routeIndex, competitors, holdsCount } = msg;
         setRouteIdx(routeIndex);
@@ -403,13 +414,19 @@ const ContestPage: FC = () => {
   }, [climbing]);
   useEffect(() => {
     const onToggle = (e: StorageEvent) => {
-      if (e.key === 'timeCriterionEnabled') {
-        setTimeCriterionEnabled(e.newValue === 'on');
-      }
+      if (!e.key) return;
+      const nsPrefix = storageKey('timeCriterionEnabled-');
+      if (!(e.key.startsWith(nsPrefix) || e.key.startsWith('timeCriterionEnabled-'))) return;
+      const key = e.key.replace(nsPrefix, 'timeCriterionEnabled-');
+      const idx = Number(key.split('-')[1] || '');
+      if (Number.isNaN(idx) || idx !== Number(boxId)) return;
+      const parsed = parseTimeCriterionValue(e.newValue);
+      if (parsed === null) return;
+      setTimeCriterionEnabled(parsed);
     };
     window.addEventListener('storage', onToggle);
     return () => window.removeEventListener('storage', onToggle);
-  }, [setTimeCriterionEnabled]);
+  }, [boxId]);
 
   // Sincronizează competitorul curent în localStorage
   useEffect(() => {
@@ -774,9 +791,7 @@ const ContestPage: FC = () => {
           // Salvează top-3 concurenți în localStorage pentru Award Ceremony
           const { rankPoints, nCompetitors } = calcRankPointsPerRoute(
             updatedRanking,
-            updatedTimes,
             totalRoutes,
-            timeCriterionEnabled,
           );
           const rows = Object.keys(rankPoints).map((nume) => {
             const rp = rankPoints[nume];
@@ -784,7 +799,10 @@ const ContestPage: FC = () => {
             const total = geomMean(rp, totalRoutes, nCompetitors);
             return { nume, rp, raw, total };
           });
-          rows.sort((a, b) => a.total - b.total);
+          rows.sort((a, b) => {
+            if (a.total !== b.total) return a.total - b.total;
+            return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
+          });
           const podium = rows.slice(0, 3).map((c, i) => ({
             name: c.nume,
             color: ['#ffd700', '#c0c0c0', '#cd7f32'][i], // aur, argint, bronz
@@ -952,9 +970,7 @@ const ContestPage: FC = () => {
             {(() => {
               const { rankPoints, nCompetitors } = calcRankPointsPerRoute(
                 ranking,
-                rankingTimes,
                 routeIdx,
-                timeCriterionEnabled,
               );
               const rows = Object.keys(rankPoints).map((nume) => {
                 const rp = rankPoints[nume];
@@ -963,7 +979,10 @@ const ContestPage: FC = () => {
                 const total = geomMean(rp, routeIdx, nCompetitors);
                 return { nume, rp, raw, rawTimes, total };
               });
-              rows.sort((a, b) => a.total - b.total);
+              rows.sort((a, b) => {
+                if (a.total !== b.total) return a.total - b.total;
+                return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
+              });
 
               // Calculează rank cu tie-handling
               const withRank = [];

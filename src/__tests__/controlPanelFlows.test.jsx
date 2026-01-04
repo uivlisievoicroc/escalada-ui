@@ -1,8 +1,18 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { render, screen, act } from '@testing-library/react';
 import React from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import ControlPanel from '../components/ControlPanel';
+
+
+// Silence debug logging in tests
+vi.mock('../utilis/debug', () => ({
+  debugLog: vi.fn(),
+  debugWarn: vi.fn(),
+  debugError: vi.fn(),
+}));
+
+let consoleWarnSpy;
 
 function seedLocalStorageForTwoBoxes() {
   const listboxes = [
@@ -37,7 +47,9 @@ function seedLocalStorageForTwoBoxes() {
   // time criterion enabled
   global.localStorage.getItem.mockImplementation((key) => {
     if (key === 'listboxes') return JSON.stringify(listboxes);
-    if (key === 'climbingTime') return '05:00';
+    if (key === 'climbingTime') return JSON.stringify('05:00');
+    if (key === 'timeCriterionEnabled-0') return 'on';
+    if (key === 'timeCriterionEnabled-1') return 'on';
     if (key === 'timeCriterionEnabled') return 'on';
     // timer values used by readCurrentTimerSec
     if (key === 'timer-0') return '250'; // 4:10 remaining
@@ -56,27 +68,40 @@ describe('ControlPanel button flows', () => {
 
     // mock fetch
     global.fetch = vi.fn(async () => ({ ok: true, json: async () => ({}) }));
+    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
+  afterEach(() => {
+    consoleWarnSpy?.mockRestore();
+  });
+
+
+
   it('sends PROGRESS_UPDATE when clicking +1 Hold for each listbox', async () => {
-    render(
-      <MemoryRouter>
-        <ControlPanel />
-      </MemoryRouter>,
-    );
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ControlPanel />
+        </MemoryRouter>,
+      );
+    });
 
     // Start both boxes to enable +1 Hold
     const startButtons = await screen.findAllByText('Start Time');
     expect(startButtons.length).toBeGreaterThanOrEqual(2);
     // click for first two boxes
-    startButtons[0].click();
-    startButtons[1].click();
+    await act(async () => {
+      startButtons[0].click();
+      startButtons[1].click();
+    });
 
     const plusHoldButtons = await screen.findAllByText('+1 Hold');
     expect(plusHoldButtons.length).toBeGreaterThanOrEqual(2);
 
-    plusHoldButtons[0].click();
-    plusHoldButtons[1].click();
+    await act(async () => {
+      plusHoldButtons[0].click();
+      plusHoldButtons[1].click();
+    });
 
     // Verify fetch called with PROGRESS_UPDATE for both boxes
     const calls = global.fetch.mock.calls.map((c) => ({ url: c[0], body: c[1]?.body }));
@@ -93,11 +118,13 @@ describe('ControlPanel button flows', () => {
   });
 
   it('does not render Register Time button', async () => {
-    render(
-      <MemoryRouter>
-        <ControlPanel />
-      </MemoryRouter>,
-    );
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ControlPanel />
+        </MemoryRouter>,
+      );
+    });
 
     await screen.findAllByText('Start Time');
 

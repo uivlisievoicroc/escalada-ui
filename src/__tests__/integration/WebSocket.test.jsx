@@ -239,6 +239,7 @@ describe('WebSocket Integration', () => {
     });
 
     it('handles malformed JSON gracefully', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const parseMessage = (data) => {
         try {
           return JSON.parse(data);
@@ -253,6 +254,7 @@ describe('WebSocket Integration', () => {
 
       expect(parseMessage(validJson)).toBeDefined();
       expect(parseMessage(malformedJson)).toBe(null);
+      consoleSpy.mockRestore();
     });
   });
 

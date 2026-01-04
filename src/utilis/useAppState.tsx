@@ -12,6 +12,7 @@ import {
   SetStateAction,
 } from 'react';
 import { useLocalStorage } from './useLocalStorage.ts';
+import { safeGetItem, safeSetItem } from './storage';
 
 /**
  * Type definitions for App State
@@ -57,8 +58,9 @@ export interface AppStateContextType {
   setListboxes: Dispatch<SetStateAction<BoxConfig[]>>;
   climbingTime: string;
   setClimbingTime: Dispatch<SetStateAction<string>>;
-  timeCriterionEnabled: boolean;
-  setTimeCriterionEnabled: Dispatch<SetStateAction<boolean>>;
+  timeCriterionByBox: BooleanStates;
+  getTimeCriterionEnabled: (boxId: number) => boolean;
+  setTimeCriterionEnabled: (boxId: number, enabled: boolean) => void;
 
   // Runtime state
   timerStates: TimerStates;
@@ -96,6 +98,25 @@ interface BroadcastChannelMessage {
   action?: string;
 }
 
+const parseTimeCriterionValue = (raw: string | null): boolean | null => {
+  if (raw === 'on') return true;
+  if (raw === 'off') return false;
+  if (!raw) return null;
+  try {
+    return !!JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
+const readTimeCriterionEnabled = (boxId: number): boolean => {
+  const perBox = parseTimeCriterionValue(safeGetItem(`timeCriterionEnabled-${boxId}`));
+  if (perBox !== null) return perBox;
+  const legacy = parseTimeCriterionValue(safeGetItem('timeCriterionEnabled'));
+  return legacy ?? false;
+};
+
+
 /**
  * Centralized App State Context
  * Consolidates localStorage, WebSocket, and BroadcastChannel messaging
@@ -106,10 +127,7 @@ export const AppStateProvider: FC<PropsWithChildren> = ({ children }) => {
   // ==================== PERSISTENT STATE (localStorage) ====================
   const [listboxes, setListboxes] = useLocalStorage<BoxConfig[]>('listboxes', []);
   const [climbingTime, setClimbingTime] = useLocalStorage<string>('climbingTime', '05:00');
-  const [timeCriterionEnabled, setTimeCriterionEnabled] = useLocalStorage<boolean>(
-    'timeCriterionEnabled',
-    false,
-  );
+  const [timeCriterionByBox, setTimeCriterionByBox] = useState<BooleanStates>({});
 
   // ==================== RUNTIME STATE (memory) ====================
   const [timerStates, setTimerStates] = useState<TimerStates>({});
@@ -118,6 +136,20 @@ export const AppStateProvider: FC<PropsWithChildren> = ({ children }) => {
   const [currentClimbers, setCurrentClimbers] = useState<StringStates>({});
   const [controlTimers, setControlTimers] = useState<NumericOrNullStates>({});
   const [usedHalfHold, setUsedHalfHold] = useState<BooleanStates>({});
+
+
+  useEffect(() => {
+    if (!listboxes.length) return;
+    setTimeCriterionByBox((prev) => {
+      const next = { ...prev };
+      listboxes.forEach((_, idx) => {
+        if (typeof next[idx] !== 'boolean') {
+          next[idx] = readTimeCriterionEnabled(idx);
+        }
+      });
+      return next;
+    });
+  }, [listboxes]);
 
   // ==================== BOX-SPECIFIC STATE ====================
   const getBoxState = useCallback(
@@ -218,6 +250,20 @@ export const AppStateProvider: FC<PropsWithChildren> = ({ children }) => {
     });
   }, []);
 
+  const getTimeCriterionEnabled = useCallback(
+    (boxId: number): boolean => {
+      const stored = timeCriterionByBox[boxId];
+      if (typeof stored === 'boolean') return stored;
+      return readTimeCriterionEnabled(boxId);
+    },
+    [timeCriterionByBox],
+  );
+
+  const setTimeCriterionEnabled = useCallback((boxId: number, enabled: boolean) => {
+    setTimeCriterionByBox((prev) => ({ ...prev, [boxId]: enabled }));
+    safeSetItem(`timeCriterionEnabled-${boxId}`, enabled ? 'on' : 'off');
+  }, []);
+
   // ==================== UTILITY FUNCTIONS ====================
   const addBox = useCallback(
     (boxConfig: Partial<BoxConfig> = {}): number => {
@@ -254,6 +300,7 @@ export const AppStateProvider: FC<PropsWithChildren> = ({ children }) => {
       setCurrentClimbers((prev) => reindexStateMap(prev, boxId));
       setControlTimers((prev) => reindexStateMap(prev, boxId));
       setUsedHalfHold((prev) => reindexStateMap(prev, boxId));
+      setTimeCriterionByBox((prev) => reindexStateMap(prev, boxId));
     },
     [reindexStateMap],
   );
@@ -286,7 +333,9 @@ export const AppStateProvider: FC<PropsWithChildren> = ({ children }) => {
           }
           break;
         case 'SET_TIME_CRITERION':
-          setTimeCriterionEnabled(payload);
+          if (boxId !== undefined && typeof payload === 'boolean') {
+            setTimeCriterionEnabled(boxId, payload);
+          }
           break;
         case 'SET_CLIMBING_TIME':
           setClimbingTime(payload);
@@ -356,7 +405,8 @@ export const AppStateProvider: FC<PropsWithChildren> = ({ children }) => {
     setListboxes,
     climbingTime,
     setClimbingTime,
-    timeCriterionEnabled,
+    timeCriterionByBox,
+    getTimeCriterionEnabled,
     setTimeCriterionEnabled,
 
     // Runtime state

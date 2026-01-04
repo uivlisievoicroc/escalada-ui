@@ -50,8 +50,24 @@ const JudgePage: FC = () => {
     const parsed = parseInt(raw, 10);
     return Number.isNaN(parsed) ? null : parsed;
   });
+  const parseTimeCriterionValue = (raw: string | null): boolean | null => {
+    if (raw === 'on') return true;
+    if (raw === 'off') return false;
+    if (!raw) return null;
+    try {
+      return !!JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+  const readTimeCriterionEnabled = (): boolean => {
+    const perBox = parseTimeCriterionValue(safeGetItem(`timeCriterionEnabled-${idx}`));
+    if (perBox !== null) return perBox;
+    const legacy = parseTimeCriterionValue(safeGetItem('timeCriterionEnabled'));
+    return legacy ?? false;
+  };
   const [timeCriterionEnabled, setTimeCriterionEnabled] = useState<boolean>(
-    () => safeGetItem('timeCriterionEnabled') === 'on',
+    () => readTimeCriterionEnabled(),
   );
   const [timerSeconds, setTimerSeconds] = useState<number | null>(() => {
     const raw = safeGetItem(`timer-${idx}`);
@@ -135,9 +151,12 @@ const JudgePage: FC = () => {
     (msg: WebSocketMessage) => {
       debugLog('🟢 [JudgePage] Handler called with:', msg);
 
-      if (msg.type === 'TIME_CRITERION') {
-        setTimeCriterionEnabled(!!msg.timeCriterionEnabled);
-        safeSetItem('timeCriterionEnabled', msg.timeCriterionEnabled ? 'on' : 'off');
+      if (msg.type === 'SET_TIME_CRITERION') {
+        if (+msg.boxId !== idx) return;
+        if (typeof msg.timeCriterionEnabled === 'boolean') {
+          setTimeCriterionEnabled(msg.timeCriterionEnabled);
+          safeSetItem(`timeCriterionEnabled-${idx}`, msg.timeCriterionEnabled ? 'on' : 'off');
+        }
         return;
       }
       if (msg.type === 'TIMER_SYNC') {
@@ -243,7 +262,7 @@ const JudgePage: FC = () => {
         }
         if (typeof msg.timeCriterionEnabled === 'boolean') {
           setTimeCriterionEnabled(msg.timeCriterionEnabled);
-          safeSetItem('timeCriterionEnabled', msg.timeCriterionEnabled ? 'on' : 'off');
+          safeSetItem(`timeCriterionEnabled-${idx}`, msg.timeCriterionEnabled ? 'on' : 'off');
         }
       }
       if (msg.type === 'ACTIVE_CLIMBER') {
@@ -307,8 +326,10 @@ const JudgePage: FC = () => {
             applyTimerPresetSnapshot(st);
             if (typeof st.registeredTime === 'number') setRegisteredTime(st.registeredTime);
             if (typeof st.remaining === 'number') setTimerSeconds(st.remaining);
-            if (typeof st.timeCriterionEnabled === 'boolean')
+            if (typeof st.timeCriterionEnabled === 'boolean') {
               setTimeCriterionEnabled(st.timeCriterionEnabled);
+              safeSetItem(`timeCriterionEnabled-${idx}`, st.timeCriterionEnabled ? 'on' : 'off');
+            }
           })
           .catch((err) => debugError('📗 [JudgePage] Failed to fetch fallback state:', err));
       }, 2000);
@@ -437,8 +458,10 @@ const JudgePage: FC = () => {
           applyTimerPresetSnapshot(st);
           if (typeof st.registeredTime === 'number') setRegisteredTime(st.registeredTime);
           if (typeof st.remaining === 'number') setTimerSeconds(st.remaining);
-          if (typeof st.timeCriterionEnabled === 'boolean')
+          if (typeof st.timeCriterionEnabled === 'boolean') {
             setTimeCriterionEnabled(st.timeCriterionEnabled);
+            safeSetItem(`timeCriterionEnabled-${idx}`, st.timeCriterionEnabled ? 'on' : 'off');
+          }
         }
       } catch (e) {
         debugError('Error fetching initial state:', e);
@@ -454,7 +477,7 @@ const JudgePage: FC = () => {
       const rawReg = safeGetItem(`registeredTime-${idx}`);
       const parsedReg = parseInt(rawReg, 10);
       setRegisteredTime(Number.isNaN(parsedReg) ? null : parsedReg);
-      setTimeCriterionEnabled(safeGetItem('timeCriterionEnabled') === 'on');
+      setTimeCriterionEnabled(readTimeCriterionEnabled());
     };
     syncFromStorage();
     const onStorage = (e: StorageEvent) => {
@@ -466,9 +489,15 @@ const JudgePage: FC = () => {
         const parsed = parseInt(e.newValue ?? '', 10);
         setRegisteredTime(Number.isNaN(parsed) ? null : parsed);
       }
-      if (e.key === storageKey('timeCriterionEnabled') || e.key === 'timeCriterionEnabled') {
-        setTimeCriterionEnabled(e.newValue === 'on');
-      }
+      const nsPrefix = storageKey('timeCriterionEnabled-');
+      if (!(e.key.startsWith(nsPrefix) || e.key.startsWith('timeCriterionEnabled-'))) return;
+      const key = e.key.replace(nsPrefix, 'timeCriterionEnabled-');
+      const parts = key.split('-');
+      const boxKey = Number(parts[1] || '');
+      if (Number.isNaN(boxKey) || boxKey !== idx) return;
+      const parsed = parseTimeCriterionValue(e.newValue);
+      if (parsed === null) return;
+      setTimeCriterionEnabled(parsed);
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -516,7 +545,7 @@ const JudgePage: FC = () => {
         }
         if (typeof snapshot.timeCriterionEnabled === 'boolean') {
           setTimeCriterionEnabled(snapshot.timeCriterionEnabled);
-          safeSetItem('timeCriterionEnabled', snapshot.timeCriterionEnabled ? 'on' : 'off');
+          safeSetItem(`timeCriterionEnabled-${idx}`, snapshot.timeCriterionEnabled ? 'on' : 'off');
         }
       }
     } catch (err) {

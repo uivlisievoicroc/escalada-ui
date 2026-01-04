@@ -1,7 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { render, screen, act } from '@testing-library/react';
 import { BrowserRouter, MemoryRouter, Routes, Route } from 'react-router-dom';
 import ContestPage from '../components/ContestPage';
+
+let localStore = {};
+let originalConsoleLog;
+
+const setupLocalStorage = () => {
+  localStore = {};
+  localStorage.getItem.mockImplementation((key) => (key in localStore ? localStore[key] : null));
+  localStorage.setItem.mockImplementation((key, value) => {
+    localStore[key] = value;
+  });
+  localStorage.removeItem.mockImplementation((key) => {
+    delete localStore[key];
+  });
+  localStorage.clear.mockImplementation(() => {
+    localStore = {};
+  });
+};
 
 // Mock dependencies
 vi.mock('../utilis/debug', () => ({
@@ -61,10 +78,26 @@ const renderContestPageAt = (path = '/contest/0') => {
   );
 };
 
+beforeAll(() => {
+  originalConsoleLog = console.log;
+  console.log = () => {};
+  if (typeof window !== 'undefined' && window.console) {
+    window.console.log = () => {};
+  }
+});
+
+afterAll(() => {
+  console.log = originalConsoleLog;
+  if (typeof window !== 'undefined' && window.console) {
+    window.console.log = originalConsoleLog;
+  }
+});
+
 describe('ContestPage - JSON.parse Regression Tests', () => {
   beforeEach(() => {
-    // Clear localStorage before each test
-    localStorage.clear();
+    setupLocalStorage();
+
+    global.fetch = vi.fn(() => new Promise(() => {}));
 
     // Mock WebSocket to prevent connection attempts
     global.WebSocket = vi.fn().mockImplementation(() => ({
@@ -253,7 +286,7 @@ describe('ContestPage - JSON.parse Regression Tests', () => {
     ];
 
     localStorage.setItem('listboxes', JSON.stringify(JSON.stringify(listboxes)));
-    localStorage.setItem('timeCriterionEnabled', JSON.stringify('on'));
+    localStorage.setItem('timeCriterionEnabled-0', JSON.stringify('on'));
 
     renderContestPageAt('/contest/0');
 
@@ -271,20 +304,77 @@ describe('ContestPage - JSON.parse Regression Tests', () => {
       );
     };
 
-    sendScore('Ana', 10, 120);
-    sendScore('Bogdan', 9, 150);
-    sendScore('Carmen', 8, 180);
-    sendScore('Dan', 7, 210);
+    await act(async () => {
+      sendScore('Ana', 10, 120);
+    });
+    await act(async () => {
+      sendScore('Bogdan', 9, 150);
+    });
+    await act(async () => {
+      sendScore('Carmen', 8, 180);
+    });
+    await act(async () => {
+      sendScore('Dan', 7, 210);
+    });
 
     expect(await screen.findByText('02:00')).toBeInTheDocument();
     expect(screen.getByText('02:30')).toBeInTheDocument();
     expect(screen.getByText('03:00')).toBeInTheDocument();
     expect(screen.queryByText('03:30')).toBeNull();
 
-    sendScore('Dan', 11, 110);
+    await act(async () => {
+      sendScore('Dan', 11, 110);
+    });
 
     expect(await screen.findByText('01:50')).toBeInTheDocument();
     expect(screen.queryByText('03:00')).toBeNull();
+  });
+
+  it('does not break ties by time and orders ties by name', async () => {
+    const listboxes = [
+      {
+        idx: 0,
+        routeIndex: 1,
+        routesCount: 1,
+        holdsCount: 10,
+        holdsCounts: [10],
+        categorie: 'Test',
+        concurenti: [
+          { nume: 'Zoe', marked: false },
+          { nume: 'Ana', marked: false },
+        ],
+      },
+    ];
+
+    localStorage.setItem('listboxes', JSON.stringify(JSON.stringify(listboxes)));
+    localStorage.setItem('timeCriterionEnabled-0', JSON.stringify('on'));
+
+    renderContestPageAt('/contest/0');
+
+    const sendScore = (competitor, score, registeredTime) => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'SUBMIT_SCORE',
+            boxId: 0,
+            competitor,
+            score,
+            registeredTime,
+          },
+        }),
+      );
+    };
+
+    await act(async () => {
+      sendScore('Zoe', 10, 60);
+    });
+    await act(async () => {
+      sendScore('Ana', 10, 120);
+    });
+
+    const ana = await screen.findByText('1. Ana');
+    const zoe = screen.getByText('1. Zoe');
+    expect(ana.compareDocumentPosition(zoe) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
 });

@@ -20,7 +20,7 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
       holdsCounts.length !== Number(routesCount) ||
       holdsCounts.some((h) => !h)
     ) {
-      alert('Completează toate câmpurile');
+      alert('Please fill in all fields.');
       return;
     }
 
@@ -41,12 +41,12 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
           clearAuth();
-          alert('Nu ești autentificat ca admin. Reloghează-te.');
+          alert('You are not authenticated as admin. Please log in again.');
           return;
         }
         const errorText = await res.text();
-        debugError('Eroare la upload:', errorText);
-        alert(`Eroare: ${errorText}`);
+        debugError('Upload failed:', errorText);
+        alert(`Error: ${errorText}`);
         return;
       }
 
@@ -61,14 +61,14 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
         setHoldsCounts([]);
         setFile(null);
         onClose?.();
-        alert('✅ Listbox încărcat cu succes!');
+        alert('✅ Listbox uploaded successfully!');
       } else {
         debugError('No listbox in response:', data);
-        alert('Eroare: nu s-a putut procesa răspunsul');
+        alert('Error: unable to process the response.');
       }
     } catch (err) {
       debugError('❌ Upload error:', err);
-      alert('Eroare la conectare: ' + err.message);
+      alert('Connection error: ' + err.message);
     }
   };
 
@@ -82,7 +82,7 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
           type="text"
           id="upload-category"
           name="category"
-          placeholder="Categorie (ex: U16-Baieti)"
+          placeholder="Category (e.g. U16-Boys)"
           value={category}
           onChange={(e) => setCategory(e.target.value)}
           className="w-full border border-gray-300 p-2 rounded"
@@ -94,7 +94,7 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
           min="1"
           id="upload-routes-count"
           name="routesCount"
-          placeholder="Nr of routes"
+          placeholder="Number of routes"
           value={routesCount}
           onChange={(e) => {
             const val = e.target.value;
@@ -113,7 +113,7 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
               min="1"
               id={`upload-holds-${i + 1}`}
               name={`holdsRoute${i + 1}`}
-              placeholder={`Nr of holds, Route ${i + 1}`}
+              placeholder={`Number of holds, Route ${i + 1}`}
               value={holdsCounts[i] || ''}
               onChange={(e) => {
                 const newCounts = [...holdsCounts];
@@ -137,13 +137,13 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
             onClick={onClose}
             className="px-3 py-1 border border-gray-400 rounded"
           >
-            Anulează
+            Cancel
           </button>
           <button
             type="submit"
             className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
           >
-            Încarcă
+            Upload
           </button>
         </div>
       </form>

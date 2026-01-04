@@ -232,7 +232,7 @@ describe('ControlPanel - Helper Functions & Logic', () => {
     it('reads time criterion flag from localStorage', () => {
       global.localStorage.getItem.mockReturnValue('on');
 
-      const enabled = global.localStorage.getItem('timeCriterionEnabled');
+      const enabled = global.localStorage.getItem('timeCriterionEnabled-0');
       expect(enabled).toBe('on');
     });
 

@@ -16,8 +16,23 @@ We want to move these actions **out of the box cards** into a **single Admin mod
 
 ---
 
+## Delivery sequencing (2 PRs)
+### PR1 (UI refactor, low risk)
+- Add a new entry point button **“Admin actions”** next to the existing **“Export Official (zip)”** control in `src/components/ControlPanel.tsx`; clicking it opens the Admin modal.
+- Implement the Admin modal and move actions 1–6 into it.
+- Include action 7 (“Set timer”) in the modal UI, but keep it **disabled** with helper text: “needs per-box criterion update”.
+- After the Admin modal actions are verified to work end-to-end, remove the legacy per-box buttons from the box cards (do not keep duplicated controls).
+- Do not change core/API behavior in PR1.
+
+### PR2 (functional change, end-to-end)
+- Implement per-box time criterion end-to-end (core + API + UI) and then enable “Set timer”.
+- Implement timer preset persistence strategy (Option 1) while enabling “Set timer”.
+
+---
+
 ## Requirements (must)
 1. Create an Admin modal/section that:
+  - Has an entry point button **“Admin actions”** placed next to **“Export Official (zip)”** (same Admin area).
    - Allows selecting a `boxId` from current boxes (`listboxes`).
    - Shows the 7 actions for the selected box:
      1) Modify score
@@ -56,7 +71,12 @@ We want to move these actions **out of the box cards** into a **single Admin mod
 7. Set timer (per box) must prompt the user for:
    - which box (default = selected Admin box, but allow overriding inside the dialog)
    - timer preset (time string, same normalization rules as today)
+  - Timer preset storage strategy (Option 1): keep global `climbingTime` as default/fallback, but when user sets a timer for a specific box, persist an override for that box (do not delete or replace the global key).
    - **criterion MUST become per box** (today it’s global; you must change it to per-box end-to-end)
+
+  Delivery note:
+  - PR1: show the “Set timer” action but keep it disabled with text “needs per-box criterion update”.
+  - PR2: enable it only after the per-box criterion change is complete.
 
 8. Keep behavior consistent with current implementation (reuse existing helpers/logic; don’t invent new endpoints unless required by the per-box criterion change).
 
@@ -146,10 +166,13 @@ We want to move these actions **out of the box cards** into a **single Admin mod
   - Update only the selected box state (`state_map[boxId]`) under that box lock.
   - WS `STATE_SNAPSHOT` for box X must include `timeCriterionEnabled` for box X.
 3) **UI: migrate without breaking old localStorage**
-  - Read criterion in this order:
-    - new per-box key: `timeCriterionEnabled-${boxId}` (or from per-box state if that’s where you store it)
-    - fallback legacy global key: `timeCriterionEnabled`
-  - Write only the new per-box key (do not write the global key anymore). Keep global only as a temporary read fallback.
+   - Migration strategy = **Option B (fallback read)**:
+     - Do **not** auto-copy the old global value to all boxes.
+     - Read criterion in this order:
+       - new per-box key: `timeCriterionEnabled-${boxId}` (or from per-box state if that’s where you store it)
+       - fallback legacy global key (temporary): `timeCriterionEnabled`
+     - Write only the new per-box key (do not write the global key anymore).
+     - Keep the legacy global key only as a temporary read fallback; once all users have per-box values set, the fallback code can be removed.
 
 ---
 
@@ -181,10 +204,15 @@ Create a small helper module or local helper functions (least invasive):
 
 ### 3) Create the Admin Actions UI (single modal)
 - Option A (preferred): implement directly inside `ControlPanel.tsx` near existing Admin/export UI.
+  - Add a button labeled **“Admin actions”** next to **“Export Official (zip)”**.
+  - Clicking it opens the Admin modal.
 - Option B: new component `src/components/ModalAdminActions.tsx`, mounted from `ControlPanel.tsx`.
 - Must include:
   - Box selector state (`selectedAdminBoxId`)
   - Derived `selectedCategorie = listboxes[selectedAdminBoxId].categorie`
+
+- PR1 requirement:
+  - Render the “Set timer” action button, but keep it disabled and show helper text “needs per-box criterion update”.
 
 ### 4) Modify score integration
 - Reuse existing Modify Score modal/component already used in `ControlPanel.tsx`.
@@ -213,15 +241,31 @@ Create a small helper module or local helper functions (least invasive):
   - user picks the Excel file of competitors
 
 ### 8) Set timer integration (dialog, per box, per-box criterion)
+- PR1: do not implement this dialog yet; keep the “Set timer” action disabled with helper text “needs per-box criterion update”.
+- PR2: implement the dialog below and enable the action.
 - Create or adapt an existing dialog (you can reuse/adapt `src/components/ModalTimer.jsx`):
   - Fields:
     - Box selector (default = selected Admin box; allow choosing another box inside dialog)
     - Time preset (string; keep same format and normalization behavior as today)
     - Criterion toggle (now per box, not global)
+    - Timer preset storage strategy (Option 1): keep global `climbingTime` as default/fallback, but when user sets a timer for a specific box, persist an override for that box (do not delete or replace the global key).
 - On submit:
   - Persist timer preset per box (today there are hints of `climbingTime-${idx}` and `listboxes[boxId]?.timerPreset` usage via `useAppState.tsx`)
   - Persist criterion per box (NEW per-box key / per-box state field)
   - Send the appropriate command(s) so backend state matches UI (requires API/core changes described above)
+
+#### Timer preset storage strategy (Option 1)
+ - Read order (when showing defaults in the dialog):
+   - First: per-box preset (whatever per-box mechanism the app already uses: `listboxes[boxId]?.timerPreset` and/or the legacy `climbingTime-${idx}` pattern)
+   - Fallback: global `climbingTime` (legacy/default)
+   - Last resort: keep the existing current default behavior
+ - Write rule:
+   - “Set timer” must persist the chosen preset as a per-box override only (do not remove or overwrite global `climbingTime`).
+
+ - On submit:
+   - Persist timer preset per box (Option 1 above)
+   - Persist criterion per box (NEW per-box key / per-box state field)
+   - Send the appropriate command(s) so backend state matches UI (requires API/core changes described above)
 
 ### 9) Backend/core changes for per-box criterion (must be implemented, not stubbed)
 - Update escalada-core:
@@ -236,7 +280,9 @@ Create a small helper module or local helper functions (least invasive):
   - Update `useAppState.tsx`, `ControlPanel.tsx`, `JudgePage.tsx`, `ContestPage.tsx` to consume per-box criterion.
 
 ### 10) Remove/migrate buttons from box cards
-- Remove the 7 per-box buttons from individual box UI.
+- Remove the legacy per-box buttons from individual box UI after the Admin modal covers them.
+- Also remove any legacy/global entry points for “Open listbox” once action #6 is available in the Admin modal.
+- Keep “Set timer” legacy entry point until PR2 enables it in the Admin modal, then remove the legacy entry point.
 - Keep any non-admin box controls intact.
 
 ### 11) Tests & verification
@@ -249,6 +295,7 @@ Create a small helper module or local helper functions (least invasive):
 ---
 
 ## Acceptance criteria
+- PR1: “Set timer” action is present in the Admin modal but disabled with helper text “needs per-box criterion update”.
 - All 7 actions are available only in the Admin modal with a box selector.
 - Open judge view + QR always include `?cat=<lb.categorie>` in the URL.
 - Set judge password defaults username to selected box `lb.categorie`, editable.

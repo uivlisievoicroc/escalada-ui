@@ -6,7 +6,6 @@ import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/
 import { sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
 import type { Box, Competitor, WebSocketMessage, TimerState, LoadingBoxes } from '../types';
 import ModalUpload from './ModalUpload';
-import ModalTimer from './ModalTimer';
 import {
   startTimer,
   stopTimer,
@@ -17,6 +16,7 @@ import {
   initRoute,
   getSessionId,
   setSessionId,
+  getBoxVersion,
   resetBox,
 } from '../utilis/contestActions';
 import ModalModifyScore from './ModalModifyScore';
@@ -67,16 +67,22 @@ const readClimbingTime = (): string => {
 };
 
 // Read timeCriterion flag supporting both "on"/"off" and JSON booleans
-const readTimeCriterionEnabled = (): boolean => {
-  const raw = safeGetItem('timeCriterionEnabled');
+const parseTimeCriterionValue = (raw: string | null): boolean | null => {
   if (raw === 'on') return true;
   if (raw === 'off') return false;
-  if (!raw) return false;
+  if (!raw) return null;
   try {
     return !!JSON.parse(raw);
   } catch {
-    return false;
+    return null;
   }
+};
+
+const readTimeCriterionEnabled = (boxId: number): boolean => {
+  const perBox = parseTimeCriterionValue(safeGetItem(`timeCriterionEnabled-${boxId}`));
+  if (perBox !== null) return perBox;
+  const legacy = parseTimeCriterionValue(safeGetItem('timeCriterionEnabled'));
+  return legacy ?? false;
 };
 
 const isTabAlive = (t: Window | null): boolean => {
@@ -85,6 +91,9 @@ const isTabAlive = (t: Window | null): boolean => {
   } catch {
     return false;
   }
+};
+const buildJudgeUrl = (boxId: number, categorie: string): string => {
+  return `${window.location.origin}/#/judge/${boxId}?cat=${encodeURIComponent(categorie)}`;
 };
 const ModalScore = lazy(() => import('./ModalScore'));
 const ControlPanel: FC = () => {
@@ -98,8 +107,23 @@ const ControlPanel: FC = () => {
     window.addEventListener('error', handler);
     return () => window.removeEventListener('error', handler);
   }, []);
-  const [showModal, setShowModal] = useState<boolean>(false);
-  const [showTimerModal, setShowTimerModal] = useState<boolean>(false);
+  const [showBoxTimerDialog, setShowBoxTimerDialog] = useState<boolean>(false);
+  const [timerDialogBoxId, setTimerDialogBoxId] = useState<number | null>(null);
+  const [timerDialogValue, setTimerDialogValue] = useState<string>('');
+  const [timerDialogCriterion, setTimerDialogCriterion] = useState<boolean>(false);
+  const [timerDialogError, setTimerDialogError] = useState<string | null>(null);
+  const [showAdminActionsModal, setShowAdminActionsModal] = useState<boolean>(false);
+  const [adminActionsView, setAdminActionsView] = useState<'actions' | 'upload'>('actions');
+  const [selectedAdminBoxId, setSelectedAdminBoxId] = useState<number | null>(null);
+  const [showQrDialog, setShowQrDialog] = useState<boolean>(false);
+  const [adminQrUrl, setAdminQrUrl] = useState<string>('');
+  const [showSetPasswordDialog, setShowSetPasswordDialog] = useState<boolean>(false);
+  const [judgeUsername, setJudgeUsername] = useState<string>('');
+  const [judgePassword, setJudgePassword] = useState<string>('');
+  const [judgePasswordConfirm, setJudgePasswordConfirm] = useState<string>('');
+  const [judgePasswordStatus, setJudgePasswordStatus] = useState<
+    { type: 'success' | 'error'; message: string } | null
+  >(null);
   const [controlTimers, setControlTimers] = useState<{ [boxId: number]: number }>({});
   const loadListboxes = (): Box[] => {
     const saved = safeGetItem('listboxes');
@@ -116,8 +140,7 @@ const ControlPanel: FC = () => {
   };
   const [listboxes, setListboxes] = useState<Box[]>(loadListboxes);
   const [climbingTime, setClimbingTime] = useState<string>(readClimbingTime);
-  const [timeCriterionEnabled, setTimeCriterionEnabled] =
-    useState<boolean>(readTimeCriterionEnabled);
+  const [timeCriterionByBox, setTimeCriterionByBox] = useState<Record<number, boolean>>({});
   const [timerStates, setTimerStates] = useState<{ [boxId: number]: TimerState }>({});
   const [activeBoxId, setActiveBoxId] = useState<number | null>(null);
   const [activeCompetitor, setActiveCompetitor] = useState<string>('');
@@ -146,7 +169,6 @@ const ControlPanel: FC = () => {
     return !(t && r === 'admin');
   });
   const [exportBoxId, setExportBoxId] = useState<number>(0);
-  const [judgeQrLinks, setJudgeQrLinks] = useState<Record<number, string>>({});
 
   // Refs pentru a păstra ultima versiune a stărilor
   const listboxesRef = useRef<Box[]>(listboxes);
@@ -171,25 +193,60 @@ const ControlPanel: FC = () => {
     holdClicksRef.current = holdClicks;
   }, [holdClicks]);
 
+  useEffect(() => {
+    if (listboxes.length === 0) return;
+    setTimeCriterionByBox((prev) => {
+      const next = { ...prev };
+      listboxes.forEach((_, idx) => {
+        if (typeof next[idx] !== 'boolean') {
+          next[idx] = readTimeCriterionEnabled(idx);
+        }
+      });
+      return next;
+    });
+  }, [listboxes]);
+
   // WebSocket: subscribe to each box channel and mirror updates from JudgePage
   const wsRefs = useRef<{ [boxId: string]: WebSocket }>({});
   const disconnectFnsRef = useRef<{ [boxId: string]: () => void }>({}); // TASK 2.4: Store disconnect functions for cleanup
-  const syncTimeCriterion = (enabled: boolean): void => {
-    setTimeCriterionEnabled(enabled);
-    safeSetItem('timeCriterionEnabled', enabled ? 'on' : 'off');
+  const getTimeCriterionEnabled = (boxId: number): boolean => {
+    const stored = timeCriterionByBox[boxId];
+    if (typeof stored === 'boolean') return stored;
+    return readTimeCriterionEnabled(boxId);
   };
-  const propagateTimeCriterion = async (enabled: boolean): Promise<void> => {
-    const previous = timeCriterionEnabled;
-    syncTimeCriterion(enabled);
+
+  const setTimeCriterionState = (boxId: number, enabled: boolean, persist: boolean): void => {
+    setTimeCriterionByBox((prev) => ({ ...prev, [boxId]: enabled }));
+    if (persist) {
+      safeSetItem(`timeCriterionEnabled-${boxId}`, enabled ? 'on' : 'off');
+    }
+    if (!enabled) {
+      clearRegisteredTime(boxId);
+    }
+  };
+
+  const syncTimeCriterion = (boxId: number, enabled: boolean): void => {
+    setTimeCriterionState(boxId, enabled, true);
+  };
+
+  const adoptTimeCriterion = (boxId: number, enabled: boolean): void => {
+    setTimeCriterionState(boxId, enabled, false);
+  };
+
+  const propagateTimeCriterion = async (boxId: number, enabled: boolean): Promise<void> => {
+    const previous = getTimeCriterionEnabled(boxId);
+    syncTimeCriterion(boxId, enabled);
     try {
       const config = getApiConfig();
       const res = await fetch(config.API_CP, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
         body: JSON.stringify({
-          boxId: -1,
+          boxId,
           type: 'SET_TIME_CRITERION',
           timeCriterionEnabled: enabled,
+          sessionId: getSessionId(boxId),
+          boxVersion: getBoxVersion(boxId),
         }),
       });
       if (!res.ok) {
@@ -205,17 +262,9 @@ const ControlPanel: FC = () => {
       }
     } catch (err) {
       debugError('Failed to propagate time criterion toggle', err);
-      syncTimeCriterion(previous);
+      syncTimeCriterion(boxId, previous);
     }
   };
-  const handleToggleTimeCriterion = () => {
-    propagateTimeCriterion(!timeCriterionEnabled);
-  };
-  // Align backend/global flag with the locally remembered toggle on first load
-  useEffect(() => {
-    propagateTimeCriterion(timeCriterionEnabled);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // Ensure we always have a fresh sessionId per box (needed for state isolation)
   useEffect(() => {
@@ -245,6 +294,9 @@ const ControlPanel: FC = () => {
             if (typeof st?.boxVersion === 'number') {
               safeSetItem(`boxVersion-${idx}`, String(st.boxVersion));
             }
+            if (typeof st?.timeCriterionEnabled === 'boolean') {
+              syncTimeCriterion(idx, st.timeCriterionEnabled);
+            }
           }
         } catch (err) {
           debugError(`Failed to prefetch state/session for box ${idx}`, err);
@@ -257,10 +309,6 @@ const ControlPanel: FC = () => {
       // Only create new WebSocket if we don't have one for this idx
       if (!wsRefs.current[idx]) {
         const handleMessage = (msg: WebSocketMessage): void => {
-          if (msg.type === 'TIME_CRITERION') {
-            syncTimeCriterion(!!msg.timeCriterionEnabled);
-            return;
-          }
           debugLog('📥 WS mesaj primit în ControlPanel:', msg);
           if (!('boxId' in msg) || +msg.boxId !== idx) return;
 
@@ -310,6 +358,11 @@ const ControlPanel: FC = () => {
                 }
               }
               break;
+            case 'SET_TIME_CRITERION':
+              if (typeof msg.timeCriterionEnabled === 'boolean') {
+                syncTimeCriterion(idx, msg.timeCriterionEnabled);
+              }
+              break;
             case 'REQUEST_STATE':
               {
                 const box = listboxesRef.current[idx] || {};
@@ -326,6 +379,7 @@ const ControlPanel: FC = () => {
                     registeredTime: registeredTimesRef.current[idx],
                     timerPreset: getTimerPreset(idx),
                     timerPresetSec: defaultTimerSec(idx),
+                    timeCriterionEnabled: getTimeCriterionEnabled(idx),
                   };
                   const ws = wsRefs.current[idx];
                   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -376,7 +430,7 @@ const ControlPanel: FC = () => {
                 setControlTimers((prev) => ({ ...prev, [idx]: typeof msg.remaining === 'number' && Number.isFinite(msg.remaining) ? msg.remaining : 0 }));
               }
               if (typeof msg.timeCriterionEnabled === 'boolean') {
-                syncTimeCriterion(msg.timeCriterionEnabled);
+                syncTimeCriterion(idx, msg.timeCriterionEnabled);
               }
               break;
             default:
@@ -742,22 +796,6 @@ const ControlPanel: FC = () => {
   }, [listboxes]);
 
   useEffect(() => {
-    safeSetItem('timeCriterionEnabled', timeCriterionEnabled ? 'on' : 'off');
-  }, [timeCriterionEnabled]);
-
-  useEffect(() => {
-    if (timeCriterionEnabled) return;
-    setRegisteredTimes({});
-    listboxes.forEach((_, idx) => {
-      try {
-        safeRemoveItem(`registeredTime-${idx}`);
-      } catch (err) {
-        debugError('Failed to clear registered times on toggle off', err);
-      }
-    });
-  }, [timeCriterionEnabled, listboxes]);
-
-  useEffect(() => {
     const onListboxChange = (e: StorageEvent) => {
       if (e.key === storageKey('listboxes') || e.key === 'listboxes') {
         try {
@@ -774,9 +812,16 @@ const ControlPanel: FC = () => {
 
   useEffect(() => {
     const onStorageToggle = (e: StorageEvent) => {
-      if (e.key === storageKey('timeCriterionEnabled') || e.key === 'timeCriterionEnabled') {
-        setTimeCriterionEnabled(e.newValue === 'on');
-      }
+      if (!e.key) return;
+      const nsPrefix = storageKey('timeCriterionEnabled-');
+      if (!(e.key.startsWith(nsPrefix) || e.key.startsWith('timeCriterionEnabled-'))) return;
+      const key = e.key.replace(nsPrefix, 'timeCriterionEnabled-');
+      const parts = key.split('-');
+      const idx = Number(parts[1] || '');
+      if (Number.isNaN(idx)) return;
+      const parsed = parseTimeCriterionValue(e.newValue);
+      if (parsed === null) return;
+      adoptTimeCriterion(idx, parsed);
     };
     window.addEventListener('storage', onStorageToggle);
     return () => window.removeEventListener('storage', onStorageToggle);
@@ -838,7 +883,7 @@ const ControlPanel: FC = () => {
     setHoldClicks((prev) => ({ ...prev, [newIdx]: 0 }));
     setUsedHalfHold((prev) => ({ ...prev, [newIdx]: false }));
     setTimerStates((prev) => ({ ...prev, [newIdx]: 'idle' }));
-    setShowModal(false);
+    setAdminActionsView('actions');
   };
 
   const handleDelete = async (index: number): Promise<void> => {
@@ -906,7 +951,7 @@ const ControlPanel: FC = () => {
             safeRemoveItem(oldSessionKey);
           }
           // Move other per-box localStorage keys
-          ['timer', 'registeredTime', 'climbingTime', 'ranking', 'rankingTimes'].forEach((key) => {
+          ['timer', 'registeredTime', 'climbingTime', 'timeCriterionEnabled', 'ranking', 'rankingTimes'].forEach((key) => {
             const oldKey = `${key}-${oldIdxNum}`;
             const newKey = `${key}-${newIdxNum}`;
             const value = safeGetItem(oldKey);
@@ -931,6 +976,15 @@ const ControlPanel: FC = () => {
     setTimerStates((prev) => {
       const { [index]: _, ...rest } = prev;
       return rest;
+    });
+    setTimeCriterionByBox((prev) => {
+      const next: Record<number, boolean> = {};
+      Object.entries(prev).forEach(([key, value]) => {
+        const idx = Number(key);
+        if (Number.isNaN(idx) || idx == index) return;
+        next[idx > index ? idx - 1 : idx] = value as boolean;
+      });
+      return next;
     });
     // remove current climber for deleted box
     setCurrentClimbers((prev) => {
@@ -1210,7 +1264,7 @@ const ControlPanel: FC = () => {
   const handleScoreSubmit = async (score: number, boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     const registeredTime = (() => {
-      if (!timeCriterionEnabled) return undefined;
+      if (!getTimeCriterionEnabled(boxIdx)) return undefined;
       const fromState = registeredTimes[boxIdx];
       if (typeof fromState === 'number') return fromState;
       const raw = safeGetItem(`registeredTime-${boxIdx}`);
@@ -1316,21 +1370,21 @@ const ControlPanel: FC = () => {
           scores: ranking,
           clubs: clubMap,
           times: rankingTimes,
-          use_time_tiebreak: timeCriterionEnabled,
+          use_time_tiebreak: getTimeCriterionEnabled(boxIdx),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      showRankingStatus(boxIdx, 'Clasament generat');
+      showRankingStatus(boxIdx, 'Rankings generated');
     } catch (err) {
-      debugError('Eroare la generarea clasamentului:', err);
-      showRankingStatus(boxIdx, 'Eroare la generare', 'error');
+      debugError('Failed to generate rankings:', err);
+      showRankingStatus(boxIdx, 'Failed to generate rankings', 'error');
     }
   };
   const handleCeremony = (category: string): void => {
     // Open the ceremony window immediately on click
     const win = window.open('/ceremony.html', '_blank', 'width=1920,height=1080');
     if (!win) {
-      alert('Browserul a blocat fereastra – activează pop-up-uri pentru acest site.');
+      alert('The browser blocked the window - please allow pop-ups for this site.');
       return;
     }
 
@@ -1341,37 +1395,64 @@ const ControlPanel: FC = () => {
       })
       .catch((err) => {
         debugError('Error fetching podium:', err);
-        alert('Nu am putut obține podium-ul de la server.');
+        alert('Unable to fetch podium data from the server.');
         win.close();
       });
   };
 
-  const handleGenerateQr = (boxIdx: number): void => {
-    const cat = listboxes[boxIdx]?.categorie;
-    const params = new URLSearchParams();
-    if (cat) params.set('cat', cat);
-    params.set('reset', '1');
-    const qs = params.toString();
-    const url = `${window.location.origin}/#/judge/${boxIdx}${qs ? `?${qs}` : ''}`;
-    setJudgeQrLinks((prev) => ({ ...prev, [boxIdx]: url }));
-    debugLog('QR generated (login link) for box', boxIdx, 'cat:', cat);
+  const openQrDialog = (boxIdx: number): void => {
+    const box = listboxes[boxIdx];
+    if (!box) return;
+    const url = buildJudgeUrl(boxIdx, box.categorie);
+    setAdminQrUrl(url);
+    setShowQrDialog(true);
   };
 
-  const handleSetJudgePassword = async (boxIdx: number): Promise<void> => {
+  const openSetJudgePasswordDialog = (boxIdx: number): void => {
+    const box = listboxes[boxIdx];
+    if (!box) return;
     if (showAdminLogin || adminRole !== 'admin') {
       setShowAdminLogin(true);
-      alert('Trebuie să fii logat ca admin pentru a seta parola de judge.');
+      alert('You must be logged in as admin to set the judge password.');
       return;
     }
+    setJudgeUsername((box.categorie || `Box ${boxIdx}`).trim());
+    setJudgePassword('');
+    setJudgePasswordConfirm('');
+    setJudgePasswordStatus(null);
+    setShowSetPasswordDialog(true);
+  };
 
-    const box = listboxes[boxIdx];
-    const username = (box?.categorie || `Box ${boxIdx}`).trim();
-    const pwd = window.prompt(`Setează parola pentru ${username}:`);
-    if (!pwd) return;
-
+  const submitJudgePassword = async (boxIdx: number): Promise<void> => {
+    if (showAdminLogin || adminRole !== 'admin') {
+      setShowAdminLogin(true);
+      setJudgePasswordStatus({
+        type: 'error',
+        message: 'You must be logged in as admin to set the judge password.',
+      });
+      return;
+    }
+    const username = judgeUsername.trim();
+    if (!username) {
+      setJudgePasswordStatus({ type: 'error', message: 'Username is required.' });
+      return;
+    }
+    if (!judgePassword) {
+      setJudgePasswordStatus({ type: 'error', message: 'Password is required.' });
+      return;
+    }
+    if (judgePassword !== judgePasswordConfirm) {
+      setJudgePasswordStatus({ type: 'error', message: 'Passwords do not match.' });
+      return;
+    }
     try {
-      await setJudgePassword(boxIdx, pwd, username);
-      alert(`Parola pentru ${username} a fost setată.`);
+      await setJudgePassword(boxIdx, judgePassword, username);
+      setJudgePasswordStatus({
+        type: 'success',
+        message: `Password set for ${username}.`,
+      });
+      setJudgePassword('');
+      setJudgePasswordConfirm('');
     } catch (err: unknown) {
       debugError('Failed to set judge password', err);
       if (err instanceof Error && err.message === 'auth_required') {
@@ -1379,24 +1460,132 @@ const ControlPanel: FC = () => {
         setAdminToken(null);
         setAdminRole(null);
         setShowAdminLogin(true);
-        alert('Nu ești autentificat ca admin. Reloghează-te.');
+        setJudgePasswordStatus({
+          type: 'error',
+          message: 'You are not authenticated as admin. Please log in again.',
+        });
         return;
       }
-      alert('Nu am putut seta parola. Verifică dacă ești logat ca admin.');
+      setJudgePasswordStatus({
+        type: 'error',
+        message: 'Unable to set password. Please verify you are logged in as admin.',
+      });
     }
+  };
+
+  const closeAdminActionsModal = (): void => {
+    setShowAdminActionsModal(false);
+    setAdminActionsView('actions');
+    setShowQrDialog(false);
+    setAdminQrUrl('');
+    setShowSetPasswordDialog(false);
+    setJudgePasswordStatus(null);
+    setShowBoxTimerDialog(false);
+    setTimerDialogError(null);
+  };
+
+  const openModifyScoreFromAdmin = (): void => {
+    if (selectedAdminBoxId == null) return;
+    const { comp, scores, times } = buildEditLists(selectedAdminBoxId);
+    setEditList(comp);
+    setEditScores(scores);
+    setEditTimes(times);
+    setShowModifyModal(true);
+  };
+
+  const openJudgeViewFromAdmin = (): void => {
+    if (selectedAdminBoxId == null) return;
+    const box = listboxes[selectedAdminBoxId];
+    if (!box) return;
+    window.open(buildJudgeUrl(selectedAdminBoxId, box.categorie), '_blank');
+  };
+
+  const openCeremonyFromAdmin = (): void => {
+    if (selectedAdminBoxId == null) return;
+    const box = listboxes[selectedAdminBoxId];
+    if (!box) return;
+    handleCeremony(sanitizeBoxName(box.categorie || `Box ${selectedAdminBoxId}`));
+  };
+
+  const handleCopyQrUrl = async (): Promise<void> => {
+    if (!adminQrUrl) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(adminQrUrl);
+        return;
+      }
+    } catch (err) {
+      debugWarn('Failed to copy QR URL via clipboard API', err);
+    }
+    window.prompt('Copy the judge URL:', adminQrUrl);
+  };
+
+  const normalizeTimerPreset = (value: string): string | null => {
+    const match = value.trim().match(/^(\d{1,2}):([0-5]\d)$/);
+    if (!match) return null;
+    const minutes = match[1].padStart(2, '0');
+    return `${minutes}:${match[2]}`;
+  };
+
+  const openBoxTimerDialog = (boxId: number | null): void => {
+    const resolved =
+      typeof boxId === 'number'
+        ? boxId
+        : selectedAdminBoxId != null
+        ? selectedAdminBoxId
+        : listboxes.length > 0
+        ? 0
+        : null;
+    setTimerDialogBoxId(resolved);
+    setTimerDialogError(null);
+    if (resolved != null) {
+      setTimerDialogValue(getTimerPreset(resolved));
+      setTimerDialogCriterion(getTimeCriterionEnabled(resolved));
+    } else {
+      setTimerDialogValue(readClimbingTime());
+      setTimerDialogCriterion(false);
+    }
+    setShowBoxTimerDialog(true);
+  };
+
+  const applyTimerPreset = (boxId: number, preset: string): void => {
+    setListboxes((prev) =>
+      prev.map((lb, idx) => (idx === boxId ? { ...lb, timerPreset: preset } : lb)),
+    );
+    safeSetItem(`climbingTime-${boxId}`, preset);
+  };
+
+  const saveBoxTimerDialog = async (): Promise<void> => {
+    if (timerDialogBoxId == null) {
+      setTimerDialogError('Select a box.');
+      return;
+    }
+    const normalized = normalizeTimerPreset(timerDialogValue);
+    if (!normalized) {
+      setTimerDialogError('Use MM:SS.');
+      return;
+    }
+    applyTimerPreset(timerDialogBoxId, normalized);
+    const currentCriterion = getTimeCriterionEnabled(timerDialogBoxId);
+    if (timerDialogCriterion !== currentCriterion) {
+      await propagateTimeCriterion(timerDialogBoxId, timerDialogCriterion);
+    }
+    setShowBoxTimerDialog(false);
   };
 
   const handleExportOfficial = async () => {
     if (showAdminLogin || adminRole !== 'admin') {
       setShowAdminLogin(true);
-      alert('Trebuie să fii logat ca admin pentru export oficial.');
+      alert('You must be logged in as admin for official export.');
       return;
     }
     try {
       await downloadOfficialResultsZip(exportBoxId);
     } catch (err) {
       debugError('Failed to export official results ZIP', err);
-      alert('Export oficial eșuat: verifică dacă API este pornit și ești logat ca admin.');
+      alert(
+        'Official export failed: verify the API is running and you are logged in as admin.',
+      );
     }
   };
 
@@ -1416,9 +1605,26 @@ const ControlPanel: FC = () => {
   }, [listboxes.length, exportBoxId]);
 
   useEffect(() => {
+    if (listboxes.length === 0) {
+      setSelectedAdminBoxId(null);
+      return;
+    }
+    if (selectedAdminBoxId == null || selectedAdminBoxId >= listboxes.length) {
+      setSelectedAdminBoxId(0);
+    }
+  }, [listboxes.length, selectedAdminBoxId]);
+
+  useEffect(() => {
     setAdminToken(getStoredToken());
     setAdminRole(getStoredRole());
   }, []);
+
+  const selectedAdminBox =
+    selectedAdminBoxId != null ? listboxes[selectedAdminBoxId] : null;
+  const adminBoxSelected = selectedAdminBoxId != null && !!selectedAdminBox;
+  const adminBoxHasMarked =
+    !!selectedAdminBox?.concurenti?.some((c) => c.marked);
+  const canOpenListbox = adminBoxSelected || listboxes.length === 0;
 
   return (
     <div className="p-6">
@@ -1442,7 +1648,7 @@ const ControlPanel: FC = () => {
                 onClick={handleAdminLogout}
                 type="button"
               >
-                Logout
+                Log out
               </button>
             ) : (
               <button
@@ -1450,13 +1656,13 @@ const ControlPanel: FC = () => {
                 onClick={() => setShowAdminLogin(true)}
                 type="button"
               >
-                Login admin
+                Log in as admin
               </button>
             )}
           </div>
           <div className="mt-3 flex flex-col gap-2">
             <label className="text-sm">
-              Box pentru export oficial
+              Box for official export
               <select
                 className="mt-1 w-full border border-gray-300 rounded px-2 py-1"
                 value={exportBoxId}
@@ -1470,14 +1676,21 @@ const ControlPanel: FC = () => {
                 ))}
               </select>
             </label>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 className="px-3 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50"
                 onClick={handleExportOfficial}
                 disabled={listboxes.length === 0}
                 type="button"
               >
-                Export oficial (ZIP)
+                Export official (ZIP)
+              </button>
+              <button
+                className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50"
+                onClick={() => setShowAdminActionsModal(true)}
+                type="button"
+              >
+                Admin actions
               </button>
               <Link
                 className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
@@ -1488,46 +1701,408 @@ const ControlPanel: FC = () => {
             </div>
           </div>
         </div>
-        <div className="flex gap-2 justify-center mb-4">
-          <button
-            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-            onClick={() => setShowModal(true)}
-          >
-            Open Listbox
-          </button>
-          <button
-            className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
-            onClick={() => setShowTimerModal(true)}
-          >
-            Set Timer
-          </button>
-        </div>
-
-        <ModalUpload
-          isOpen={showModal}
-          onClose={() => setShowModal(false)}
-          onUpload={handleUpload}
-        />
-        <ModalTimer
-          isOpen={showTimerModal}
-          onClose={() => setShowTimerModal(false)}
-          onSet={(time: string) => {
-            safeSetItem('climbingTime', time);
-            setClimbingTime(time);
-          }}
-          timeCriterionEnabled={timeCriterionEnabled}
-          onToggleTimeCriterion={handleToggleTimeCriterion}
-        />
       </div>
 
-	      <div className="mt-6 flex flex-nowrap gap-4 overflow-x-auto">
-	        {listboxes.map((lb, idx) => {
-	          const catParam = lb.categorie ? `?cat=${encodeURIComponent(lb.categorie)}` : '';
-	          const baseJudgeUrl = `${window.location.origin}/#/judge/${idx}${catParam}`;
-	          const judgeUrl = judgeQrLinks[idx] || baseJudgeUrl;
-	          const timerState = timerStates[idx] || 'idle';
-	          const isRunning = timerState === 'running';
-	          const isPaused = timerState === 'paused';
+      <ModalModifyScore
+        isOpen={showModifyModal && editList.length > 0}
+        competitors={editList}
+        scores={editScores}
+        times={editTimes}
+        onClose={() => setShowModifyModal(false)}
+        onSubmit={(name: string, newScore: number, newTime: number | null) => {
+          if (selectedAdminBoxId == null) return;
+          persistRankingEntry(selectedAdminBoxId, name, newScore, newTime);
+          submitScore(
+            selectedAdminBoxId,
+            newScore,
+            name,
+            typeof newTime === 'number' ? newTime : undefined,
+          );
+          setShowModifyModal(false);
+        }}
+      />
+
+      {showAdminActionsModal && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-5xl rounded-xl bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-4">
+              <div>
+                <div className="text-xl font-semibold">Admin actions</div>
+                <div className="text-sm text-slate-600">
+                  Select a box to run admin tasks in one place.
+                </div>
+              </div>
+              <button
+                className="px-3 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
+                onClick={closeAdminActionsModal}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-6">
+              {adminActionsView === 'actions' ? (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="border border-slate-200 rounded-lg p-4 space-y-3">
+                    <div className="text-sm font-semibold text-slate-700">Box selection</div>
+                    <label className="text-sm">
+                      Select box
+                      <select
+                        className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                        value={selectedAdminBoxId ?? ''}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setSelectedAdminBoxId(value === '' ? null : Number(value));
+                        }}
+                        disabled={listboxes.length === 0}
+                      >
+                        {listboxes.length === 0 ? (
+                          <option value="">No boxes available</option>
+                        ) : (
+                          listboxes.map((b, idx) => (
+                            <option key={idx} value={idx}>
+                              {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                    {selectedAdminBox ? (
+                      <div className="text-sm text-slate-600">
+                        <div className="font-semibold text-slate-800">
+                          {sanitizeBoxName(selectedAdminBox.categorie || `Box ${selectedAdminBoxId}`)}
+                        </div>
+                        <div>
+                          Routes: {selectedAdminBox.routeIndex}/{selectedAdminBox.routesCount}
+                        </div>
+                        <div>Competitors: {selectedAdminBox.concurenti?.length ?? 0}</div>
+                        <div>
+                          Status: {selectedAdminBox.initiated ? 'Initiated' : 'Not initiated'}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-slate-500">
+                        Select a box to enable actions.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="border border-slate-200 rounded-lg p-4">
+                      <div className="text-sm font-semibold text-slate-700 mb-2">Scoring</div>
+                      <div className="flex flex-col gap-2">
+                        <button
+                          className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={openModifyScoreFromAdmin}
+                          disabled={!adminBoxSelected || !adminBoxHasMarked}
+                          type="button"
+                        >
+                          Modify score
+                        </button>
+                        <button
+                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={openCeremonyFromAdmin}
+                          disabled={!adminBoxSelected}
+                          type="button"
+                        >
+                          Award ceremony
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="border border-slate-200 rounded-lg p-4">
+                      <div className="text-sm font-semibold text-slate-700 mb-2">Judge access</div>
+                      <div className="flex flex-col gap-2">
+                        <button
+                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={openJudgeViewFromAdmin}
+                          disabled={!adminBoxSelected || !selectedAdminBox?.initiated}
+                          type="button"
+                        >
+                          Open judge view
+                        </button>
+                        <button
+                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={() => {
+                            if (selectedAdminBoxId == null) return;
+                            openQrDialog(selectedAdminBoxId);
+                          }}
+                          disabled={!adminBoxSelected}
+                          type="button"
+                        >
+                          Generate QR
+                        </button>
+                        <button
+                          className="px-3 py-2 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={() => {
+                            if (selectedAdminBoxId == null) return;
+                            openSetJudgePasswordDialog(selectedAdminBoxId);
+                          }}
+                          disabled={!adminBoxSelected}
+                          type="button"
+                        >
+                          Set judge password
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="border border-slate-200 rounded-lg p-4">
+                      <div className="text-sm font-semibold text-slate-700 mb-2">Setup</div>
+                      <div className="flex flex-col gap-2">
+                        <button
+                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={() => setAdminActionsView('upload')}
+                          disabled={!canOpenListbox}
+                          type="button"
+                        >
+                          Open listbox
+                        </button>
+                        <button
+                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={() => openBoxTimerDialog(selectedAdminBoxId)}
+                          disabled={!adminBoxSelected}
+                          type="button"
+                        >
+                          Set timer
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <button
+                    className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200"
+                    onClick={() => setAdminActionsView('actions')}
+                    type="button"
+                  >
+                    Back
+                  </button>
+                  <ModalUpload
+                    isOpen={adminActionsView === 'upload'}
+                    onClose={() => setAdminActionsView('actions')}
+                    onUpload={handleUpload}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showQrDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-lg font-semibold">Judge QR</div>
+                <div className="text-sm text-slate-600">manual authentication required</div>
+              </div>
+              <button
+                className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
+                onClick={() => setShowQrDialog(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+            <div className="mt-4 flex flex-col items-center gap-3">
+              <QRCode value={adminQrUrl} size={180} />
+              <div className="w-full rounded border border-slate-200 bg-slate-50 p-2 text-xs break-all">
+                {adminQrUrl}
+              </div>
+              <button
+                className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200"
+                onClick={handleCopyQrUrl}
+                type="button"
+              >
+                Copy URL
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSetPasswordDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-lg font-semibold">Set judge password</div>
+                <div className="text-sm text-slate-600">
+                  Choose credentials for the judge login.
+                </div>
+              </div>
+              <button
+                className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
+                onClick={() => setShowSetPasswordDialog(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+            <div className="mt-4 space-y-3">
+              <label className="text-sm">
+                Username
+                <input
+                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                  value={judgeUsername}
+                  onChange={(e) => setJudgeUsername(e.target.value)}
+                  type="text"
+                />
+              </label>
+              <label className="text-sm">
+                Password
+                <input
+                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                  value={judgePassword}
+                  onChange={(e) => setJudgePassword(e.target.value)}
+                  type="password"
+                />
+              </label>
+              <label className="text-sm">
+                Confirm password
+                <input
+                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                  value={judgePasswordConfirm}
+                  onChange={(e) => setJudgePasswordConfirm(e.target.value)}
+                  type="password"
+                />
+              </label>
+              {judgePasswordStatus && (
+                <div
+                  className={`text-sm rounded px-3 py-2 ${
+                    judgePasswordStatus.type === 'success'
+                      ? 'bg-green-100 text-green-700'
+                      : 'bg-red-100 text-red-700'
+                  }`}
+                >
+                  {judgePasswordStatus.message}
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <button
+                  className="px-3 py-2 rounded border border-slate-200 hover:bg-slate-100"
+                  onClick={() => setShowSetPasswordDialog(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="px-3 py-2 bg-amber-600 text-white rounded hover:bg-amber-700"
+                  onClick={() => {
+                    if (selectedAdminBoxId == null) return;
+                    void submitJudgePassword(selectedAdminBoxId);
+                  }}
+                  type="button"
+                >
+                  Save password
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBoxTimerDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-lg font-semibold">Set timer</div>
+                <div className="text-sm text-slate-600">
+                  Configure timer preset and top-3 time display per box.
+                </div>
+              </div>
+              <button
+                className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
+                onClick={() => setShowBoxTimerDialog(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+            <div className="mt-4 space-y-3">
+              <label className="text-sm">
+                Box
+                <select
+                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                  value={timerDialogBoxId ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    const nextId = value === '' ? null : Number(value);
+                    setTimerDialogBoxId(nextId);
+                    setTimerDialogError(null);
+                    if (nextId != null) {
+                      setTimerDialogValue(getTimerPreset(nextId));
+                      setTimerDialogCriterion(getTimeCriterionEnabled(nextId));
+                    } else {
+                      setTimerDialogCriterion(false);
+                    }
+                  }}
+                  disabled={listboxes.length === 0}
+                >
+                  {listboxes.length === 0 ? (
+                    <option value="">No boxes available</option>
+                  ) : (
+                    listboxes.map((b, idx) => (
+                      <option key={idx} value={idx}>
+                        {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="text-sm">
+                Timer preset (MM:SS)
+                <input
+                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                  value={timerDialogValue}
+                  onChange={(e) => setTimerDialogValue(e.target.value)}
+                  placeholder="MM:SS"
+                  type="text"
+                />
+              </label>
+              <button
+                className="w-full px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={() => setTimerDialogCriterion((prev) => !prev)}
+                disabled={timerDialogBoxId == null}
+                type="button"
+              >
+                Top-3 time display: {timerDialogCriterion ? 'On' : 'Off'}
+              </button>
+              {timerDialogError && (
+                <div className="text-sm rounded px-3 py-2 bg-red-100 text-red-700">
+                  {timerDialogError}
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <button
+                  className="px-3 py-2 rounded border border-slate-200 hover:bg-slate-100"
+                  onClick={() => setShowBoxTimerDialog(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={() => void saveBoxTimerDialog()}
+                  disabled={timerDialogBoxId == null}
+                  type="button"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-6 flex flex-nowrap gap-4 overflow-x-auto">
+        {listboxes.map((lb, idx) => {
+          const timerState = timerStates[idx] || 'idle';
+          const isRunning = timerState === 'running';
+          const isPaused = timerState === 'paused';
           return (
             <details
               key={idx}
@@ -1536,7 +2111,7 @@ const ControlPanel: FC = () => {
             >
               <summary className="flex justify-between items-center text-lg font-semibold cursor-pointer p-2 bg-gray-100">
                 <span>
-                  {sanitizeBoxName(lb.categorie)} – Traseu {lb.routeIndex}/{lb.routesCount}
+                  {sanitizeBoxName(lb.categorie)} – Route {lb.routeIndex}/{lb.routesCount}
                 </span>
                 <div className="px-2 py-1 text-right text-sm text-gray-600">
                   {typeof controlTimers[idx] === 'number'
@@ -1696,38 +2271,11 @@ const ControlPanel: FC = () => {
                     competitor={activeCompetitor}
                     initialScore={holdClicks[idx] || 0}
                     maxScore={lb.holdsCount}
-                    registeredTime={timeCriterionEnabled ? registeredTimes[idx] : undefined}
+                    registeredTime={getTimeCriterionEnabled(idx) ? registeredTimes[idx] : undefined}
                     onClose={() => setShowScoreModal(false)}
                     onSubmit={(score: number) => handleScoreSubmit(score, idx)}
                   />
                 </Suspense>
-
-                <button
-                  className="px-3 py-1 bg-green-600 text-white rounded mt-2 disabled:opacity-50"
-                  onClick={() => {
-                    const { comp, scores, times } = buildEditLists(idx);
-                    setEditList(comp);
-                    setEditScores(scores);
-                    setEditTimes(times);
-                    setShowModifyModal(true);
-                  }}
-                  disabled={lb.concurenti.filter((c) => c.marked).length === 0}
-                >
-                  Modify score
-                </button>
-
-                <ModalModifyScore
-                  isOpen={showModifyModal && editList.length > 0}
-                  competitors={editList}
-                  scores={editScores}
-                  times={editTimes}
-                  onClose={() => setShowModifyModal(false)}
-                  onSubmit={(name: string, newScore: number, newTime: number | null) => {
-                    persistRankingEntry(idx, name, newScore, newTime);
-                    submitScore(idx, newScore, name, typeof newTime === 'number' ? newTime : undefined);
-                    setShowModifyModal(false);
-                  }}
-                />
 
                 <button
                   className="px-3 py-1 bg-green-600 text-white rounded disabled:opacity-50"
@@ -1736,38 +2284,6 @@ const ControlPanel: FC = () => {
                 >
                   Next Route
                 </button>
-
-	                <div className="flex flex-col gap-2">
-	                  <button
-	                    className="px-3 py-1 bg-teal-600 text-white rounded hover:bg-teal-700 disabled:opacity-50"
-	                    onClick={() => window.open(baseJudgeUrl, '_blank')}
-	                    disabled={!lb.initiated}
-	                    type="button"
-	                  >
-	                    Open Judge View
-	                  </button>
-	                  <button
-	                    className="px-3 py-1 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
-	                    onClick={() => handleGenerateQr(idx)}
-	                    type="button"
-	                  >
-	                    Generate QR
-	                  </button>
-	                  <button
-	                    className="px-3 py-1 bg-gray-700 text-white rounded hover:bg-gray-800 disabled:opacity-50"
-	                    onClick={() => void handleSetJudgePassword(idx)}
-	                    type="button"
-	                  >
-	                    Set judge password
-	                  </button>
-	                  <div className="mt-2 flex flex-col items-center">
-	                    <span className="text-sm text-center">
-	                      Scan QR și loghează-te cu parola Judge (user ={' '}
-	                      {sanitizeBoxName(lb.categorie || `Box ${idx}`)})
-	                    </span>
-	                    <QRCode value={judgeUrl} size={96} />
-	                  </div>
-	                </div>
 
                 <div className="flex gap-2">
                   <button
@@ -1802,13 +2318,6 @@ const ControlPanel: FC = () => {
                     {rankingStatus[idx].message}
                   </div>
                 )}
-
-                <button
-                  className="mt-2 px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700"
-                  onClick={() => handleCeremony(sanitizeBoxName(lb.categorie))}
-                >
-                  Award Ceremony
-                </button>
               </div>
             </details>
           );
