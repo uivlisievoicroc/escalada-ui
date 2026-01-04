@@ -976,39 +976,44 @@ const ContestPage: FC = () => {
                 prevRank = rank;
               });
 
-              return withRank.map((row) => (
-                <div
-                  key={row.nume}
-                  className={`grid gap-2 divide-x divide-gray-200 py-2 text-2xl ${rankClass(row.rank)}`}
-                  style={{ gridTemplateColumns: `1fr repeat(${routeIdx}, 1fr) 80px` }}
-                >
-                  <span className="px-2 text-4xl font-semibold">
-                    {row.rank}. {sanitizeCompetitorName(row.nume)}
-                  </span>
-                  {Array.from({ length: routeIdx }).map((_, i) => {
-                    const scoreVal = row.raw[i];
-                    const timeVal = row.rawTimes[i];
-                    return (
-                      <span
-                        key={i}
-                        className="px-2 text-right flex flex-col items-end leading-tight"
-                      >
-                        {scoreVal !== undefined
-                          ? holdsCountsAll[i] && scoreVal === Number(holdsCountsAll[i])
-                            ? 'Top'
-                            : scoreVal.toFixed(1)
-                          : '—'}
-                        {timeVal != null && timeCriterionEnabled && (
-                          <span className="text-base text-gray-600">{formatSeconds(timeVal)}</span>
-                        )}
-                      </span>
-                    );
-                  })}
-                  <span className="px-2 text-right font-mono text-red-500">
-                    {row.total.toFixed(3)}
-                  </span>
-                </div>
-              ));
+              return withRank.map((row, rowIndex) => {
+                const showTime = timeCriterionEnabled && rowIndex < 3;
+                return (
+                  <div
+                    key={row.nume}
+                    className={`grid gap-2 divide-x divide-gray-200 py-2 text-2xl ${rankClass(row.rank)}`}
+                    style={{ gridTemplateColumns: `1fr repeat(${routeIdx}, 1fr) 80px` }}
+                  >
+                    <span className="px-2 text-4xl font-semibold">
+                      {row.rank}. {sanitizeCompetitorName(row.nume)}
+                    </span>
+                    {Array.from({ length: routeIdx }).map((_, i) => {
+                      const scoreVal = row.raw[i];
+                      const timeVal = row.rawTimes[i];
+                      return (
+                        <span
+                          key={i}
+                          className="px-2 text-right flex flex-col items-end leading-tight"
+                        >
+                          {scoreVal !== undefined
+                            ? holdsCountsAll[i] && scoreVal === Number(holdsCountsAll[i])
+                              ? 'Top'
+                              : scoreVal.toFixed(1)
+                            : '—'}
+                          {timeVal != null && showTime && (
+                            <span className="text-base text-gray-600">
+                              {formatSeconds(timeVal)}
+                            </span>
+                          )}
+                        </span>
+                      );
+                    })}
+                    <span className="px-2 text-right font-mono text-red-500">
+                      {row.total.toFixed(3)}
+                    </span>
+                  </div>
+                );
+              });
             })()}
           </div>
         </aside>

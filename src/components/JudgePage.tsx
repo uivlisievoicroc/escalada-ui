@@ -6,7 +6,6 @@ import {
   resumeTimer,
   updateProgress,
   submitScore,
-  registerTime,
   getSessionId,
   setSessionId,
 } from '../utilis/contestActions';
@@ -224,6 +223,9 @@ const JudgePage: FC = () => {
         setMaxScore(msg.holdsCount || 0);
         setCurrentClimber(msg.currentClimber || '');
         if (msg.sessionId) setSessionId(idx, msg.sessionId);
+        if (typeof msg.boxVersion === 'number') {
+          safeSetItem(`boxVersion-${idx}`, msg.boxVersion.toString());
+        }
         setTimerState(msg.timerState || (msg.started ? 'running' : 'idle'));
         setHoldCount(msg.holdCount || 0);
         applyTimerPresetSnapshot(msg);
@@ -296,6 +298,7 @@ const JudgePage: FC = () => {
             if (!st) return;
             debugLog('📗 [JudgePage] Applied fallback HTTP state:', st);
             if (st.sessionId) setSessionId(idx, st.sessionId);
+            if (typeof st.boxVersion === 'number') safeSetItem(`boxVersion-${idx}`, String(st.boxVersion));
             setInitiated(!!st.initiated);
             setMaxScore(st.holdsCount || 0);
             setCurrentClimber(st.currentClimber || '');
@@ -425,6 +428,7 @@ const JudgePage: FC = () => {
         if (res.ok) {
           const st = await res.json();
           if (st.sessionId) setSessionId(idx, st.sessionId);
+          if (typeof st.boxVersion === 'number') safeSetItem(`boxVersion-${idx}`, String(st.boxVersion));
           setInitiated(st.initiated);
           setMaxScore(st.holdsCount);
           setCurrentClimber(st.currentClimber);
@@ -499,6 +503,9 @@ const JudgePage: FC = () => {
       if (res.ok) {
         snapshot = await res.json();
         applyTimerPresetSnapshot(snapshot);
+        if (typeof snapshot.boxVersion === 'number') {
+          safeSetItem(`boxVersion-${idx}`, String(snapshot.boxVersion));
+        }
         if (typeof snapshot.remaining === 'number') {
           setTimerSeconds(snapshot.remaining);
           safeSetItem(`timer-${idx}`, snapshot.remaining.toString());
@@ -566,23 +573,6 @@ const JudgePage: FC = () => {
     }
     updateProgress(idx, 0.1);
     setUsedHalfHold(true);
-  };
-
-  const handleRegisterTime = async () => {
-    if (!timeCriterionEnabled || !isPaused) return;
-    const current = await resolveRemainingSeconds();
-    if (current == null || Number.isNaN(current)) {
-      alert('Nu există un timp de înregistrat pentru acest box.');
-      return;
-    }
-    const elapsed = Math.max(0, totalDurationSec() - current);
-    setRegisteredTime(elapsed);
-    try {
-      safeSetItem(`registeredTime-${idx}`, elapsed.toString());
-    } catch (err) {
-      debugError('Failed storing registered time', err);
-    }
-    registerTime(idx, elapsed);
   };
 
   // Handler for Insert Score
@@ -682,17 +672,7 @@ const JudgePage: FC = () => {
             >
               Resume Time
             </button>
-            <button
-              className="px-3 py-1 bg-gray-500 text-white rounded disabled:opacity-50"
-              onClick={handleRegisterTime}
-              disabled={!initiated || !timeCriterionEnabled}
-            >
-              Register Time
-            </button>
           </div>
-        )}
-        {isPaused && timeCriterionEnabled && registeredTime !== null && (
-          <div className="text-xs text-gray-700">Registered: {formatTime(registeredTime)}</div>
         )}
         <div className="flex gap-2">
           <button

@@ -92,34 +92,15 @@ describe('ControlPanel button flows', () => {
     expect(hasBox1).toBe(true);
   });
 
-  it('registers time after Stop and shows Registered text', async () => {
+  it('does not render Register Time button', async () => {
     render(
       <MemoryRouter>
         <ControlPanel />
       </MemoryRouter>,
     );
 
-    // Start then Stop for box 0 to enter paused state
-    const startButtons = await screen.findAllByText('Start Time');
-    startButtons[0].click();
+    await screen.findAllByText('Start Time');
 
-    const stopButtons = await screen.findAllByText('Stop Time');
-    stopButtons[0].click();
-
-    // Register Time should be visible now
-    const registerButtons = await screen.findAllByText('Register Time');
-    registerButtons[0].click();
-
-    // UI should display Registered: mm:ss for box 0 (elapsed 50s from 300-250)
-    const registeredText = await screen.findByText(/Registered: 00:50/);
-    expect(registeredText).toBeInTheDocument();
-
-    // Verify REGISTER_TIME sent to backend
-    const calls = global.fetch.mock.calls.map((c) => ({ url: c[0], body: c[1]?.body }));
-    const registerCalls = calls.filter(
-      (c) => typeof c.body === 'string' && c.body.includes('REGISTER_TIME'),
-    );
-    const hasBox0 = registerCalls.some((c) => c.body.includes('"boxId":0'));
-    expect(hasBox0).toBe(true);
+    expect(screen.queryByText('Register Time')).toBeNull();
   });
 });

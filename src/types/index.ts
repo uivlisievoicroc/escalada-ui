@@ -90,6 +90,7 @@ export interface StateSnapshot {
   holdCount: number;
   competitors: Array<{ nume: string; marked: boolean }>;
   categorie: string;
+  boxVersion?: number;
   registeredTime?: number | null;
   remaining?: number | null;
   timeCriterionEnabled?: boolean;

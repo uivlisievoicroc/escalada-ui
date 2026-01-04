@@ -15,7 +15,6 @@ import {
   requestActiveCompetitor,
   submitScore,
   initRoute,
-  registerTime,
   getSessionId,
   setSessionId,
   resetBox,
@@ -24,7 +23,13 @@ import ModalModifyScore from './ModalModifyScore';
 import getWinners from '../utilis/getWinners';
 import useWebSocketWithHeartbeat from '../utilis/useWebSocketWithHeartbeat';
 import { normalizeStorageValue } from '../utilis/normalizeStorageValue';
-import { clearAuth, getStoredRole, getStoredToken, setJudgePassword } from '../utilis/auth';
+import {
+  clearAuth,
+  getAuthHeader,
+  getStoredRole,
+  getStoredToken,
+  setJudgePassword,
+} from '../utilis/auth';
 import { downloadOfficialResultsZip } from '../utilis/backup';
 import LoginOverlay from './LoginOverlay';
 
@@ -174,20 +179,33 @@ const ControlPanel: FC = () => {
     safeSetItem('timeCriterionEnabled', enabled ? 'on' : 'off');
   };
   const propagateTimeCriterion = async (enabled: boolean): Promise<void> => {
+    const previous = timeCriterionEnabled;
     syncTimeCriterion(enabled);
     try {
       const config = getApiConfig();
-      await fetch(config.API_CP, {
+      const res = await fetch(config.API_CP, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
         body: JSON.stringify({
           boxId: -1,
           type: 'SET_TIME_CRITERION',
           timeCriterionEnabled: enabled,
         }),
       });
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          clearAuth();
+          setAdminToken(null);
+          setAdminRole(null);
+          setShowAdminLogin(true);
+          throw new Error('auth_required');
+        }
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
     } catch (err) {
       debugError('Failed to propagate time criterion toggle', err);
+      syncTimeCriterion(previous);
     }
   };
   const handleToggleTimeCriterion = () => {
@@ -202,14 +220,30 @@ const ControlPanel: FC = () => {
   // Ensure we always have a fresh sessionId per box (needed for state isolation)
   useEffect(() => {
     const config = getApiConfig();
+    const authHeader = getAuthHeader();
+    if (!authHeader.Authorization) {
+      return;
+    }
     listboxes.forEach((_, idx) => {
       (async () => {
         try {
-          const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${idx}`);
+          const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${idx}`, {
+            headers: { ...authHeader },
+          });
+          if (res.status === 401) {
+            clearAuth();
+            setAdminToken(null);
+            setAdminRole(null);
+            setShowAdminLogin(true);
+            return;
+          }
           if (res.ok) {
             const st = await res.json();
             if (st?.sessionId) {
               setSessionId(idx, st.sessionId);
+            }
+            if (typeof st?.boxVersion === 'number') {
+              safeSetItem(`boxVersion-${idx}`, String(st.boxVersion));
             }
           }
         } catch (err) {
@@ -303,6 +337,9 @@ const ControlPanel: FC = () => {
             case 'STATE_SNAPSHOT':
               if (msg.sessionId) {
                 setSessionId(idx, msg.sessionId);
+              }
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
               }
               // Ignore stale snapshot values for non‑initiated boxes
               setTimerStates((prev) => ({
@@ -602,20 +639,6 @@ const ControlPanel: FC = () => {
     } catch (err) {
       debugError('Failed to clear registered time', err);
     }
-  };
-
-  const handleRegisterTime = (idx: number) => {
-    if (!timeCriterionEnabled) return;
-    const current = readCurrentTimerSec(idx);
-    if (current == null) {
-      alert('Nu există un timp de înregistrat pentru acest box.');
-      return;
-    }
-    const total = defaultTimerSec(idx);
-    const elapsed = Math.max(0, total - current);
-    setRegisteredTimes((prev) => ({ ...prev, [idx]: elapsed }));
-    safeSetItem(`registeredTime-${idx}`, elapsed.toString());
-    registerTime(idx, elapsed);
   };
 
   useEffect(() => {
@@ -1606,29 +1629,8 @@ const ControlPanel: FC = () => {
                         'Resume Time'
                       )}
                     </button>
-                    <button
-                      className={`px-3 py-1 bg-gray-500 text-white rounded disabled:opacity-50 ${loadingBoxes.has(idx) ? 'btn-loading' : ''}`}
-                      onClick={() => handleRegisterTime(idx)}
-                      disabled={!lb.initiated || !timeCriterionEnabled || loadingBoxes.has(idx)}
-                    >
-                      {loadingBoxes.has(idx) ? (
-                        <>
-                          <span className="spinner-border spinner-border-sm inline-block mr-2" />
-                          Registering...
-                        </>
-                      ) : (
-                        'Register Time'
-                      )}
-                    </button>
                   </div>
                 )}
-
-                {isPaused && timeCriterionEnabled && registeredTimes[idx] !== undefined && (
-                  <div className="text-xs text-gray-700 px-1">
-                    Registered: {formatTime(registeredTimes[idx])}
-                  </div>
-                )}
-
                 <div className="flex flex-col items-center gap-1">
                   <div className="flex gap-1">
                     <button

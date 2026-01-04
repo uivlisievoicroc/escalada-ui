@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { BrowserRouter } from 'react-router-dom';
+import { BrowserRouter, MemoryRouter, Routes, Route } from 'react-router-dom';
 import ContestPage from '../components/ContestPage';
 
 // Mock dependencies
@@ -47,6 +47,17 @@ const renderContestPage = () => {
     <BrowserRouter>
       <ContestPage />
     </BrowserRouter>,
+  );
+};
+
+
+const renderContestPageAt = (path = '/contest/0') => {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/contest/:boxId" element={<ContestPage />} />
+      </Routes>
+    </MemoryRouter>,
   );
 };
 
@@ -223,4 +234,57 @@ describe('ContestPage - JSON.parse Regression Tests', () => {
 
     expect(document.body).toBeTruthy();
   });
+  it('shows times only for top 3 when time criterion is enabled', async () => {
+    const listboxes = [
+      {
+        idx: 0,
+        routeIndex: 1,
+        routesCount: 1,
+        holdsCount: 10,
+        holdsCounts: [10],
+        categorie: 'Test',
+        concurenti: [
+          { nume: 'Ana', marked: false },
+          { nume: 'Bogdan', marked: false },
+          { nume: 'Carmen', marked: false },
+          { nume: 'Dan', marked: false },
+        ],
+      },
+    ];
+
+    localStorage.setItem('listboxes', JSON.stringify(JSON.stringify(listboxes)));
+    localStorage.setItem('timeCriterionEnabled', JSON.stringify('on'));
+
+    renderContestPageAt('/contest/0');
+
+    const sendScore = (competitor, score, registeredTime) => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'SUBMIT_SCORE',
+            boxId: 0,
+            competitor,
+            score,
+            registeredTime,
+          },
+        }),
+      );
+    };
+
+    sendScore('Ana', 10, 120);
+    sendScore('Bogdan', 9, 150);
+    sendScore('Carmen', 8, 180);
+    sendScore('Dan', 7, 210);
+
+    expect(await screen.findByText('02:00')).toBeInTheDocument();
+    expect(screen.getByText('02:30')).toBeInTheDocument();
+    expect(screen.getByText('03:00')).toBeInTheDocument();
+    expect(screen.queryByText('03:30')).toBeNull();
+
+    sendScore('Dan', 11, 110);
+
+    expect(await screen.findByText('01:50')).toBeInTheDocument();
+    expect(screen.queryByText('03:00')).toBeNull();
+  });
+
 });
