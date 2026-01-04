@@ -1,11 +1,12 @@
 import QRCode from 'react-qr-code';
 import React, { useState, useEffect, useRef, Suspense, lazy, FC } from 'react';
-import { Link } from 'react-router-dom';
 import { debugLog, debugWarn, debugError } from '../utilis/debug';
 import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
 import { sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
 import type { Box, Competitor, WebSocketMessage, TimerState, LoadingBoxes } from '../types';
 import ModalUpload from './ModalUpload';
+import AdminExportOfficialView from './AdminExportOfficialView';
+import AdminAuditView from './AdminAuditView';
 import {
   startTimer,
   stopTimer,
@@ -46,6 +47,71 @@ const getApiConfig = () => {
     WS_PROTOCOL_CP: wsProtocol,
   };
 };
+
+type AdminActionsView = 'actions' | 'upload' | 'export' | 'audit';
+
+const ADMIN_VIEW_LABELS: Record<AdminActionsView, string> = {
+  actions: 'Actions',
+  upload: 'Upload',
+  export: 'Export',
+  audit: 'Audit',
+};
+
+type IconProps = React.SVGProps<SVGSVGElement>;
+
+const IconBase: React.FC<IconProps> = ({ className, children, ...props }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.5}
+    className={`h-5 w-5 ${className || ''}`}
+    aria-hidden="true"
+    {...props}
+  >
+    {children}
+  </svg>
+);
+
+const Squares2X2Icon: React.FC<IconProps> = (props) => (
+  <IconBase {...props}>
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M3 3.75A.75.75 0 013.75 3h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-.75.75h-4.5A.75.75 0 013 8.25v-4.5zM3 14.25a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-.75.75h-4.5a.75.75 0 01-.75-.75v-4.5zM14.25 3a.75.75 0 00-.75.75v4.5a.75.75 0 00.75.75h4.5a.75.75 0 00.75-.75v-4.5a.75.75 0 00-.75-.75h-4.5zM14.25 14.25a.75.75 0 00-.75.75v4.5a.75.75 0 00.75.75h4.5a.75.75 0 00.75-.75v-4.5a.75.75 0 00-.75-.75h-4.5z"
+    />
+  </IconBase>
+);
+
+const ArrowUpTrayIcon: React.FC<IconProps> = (props) => (
+  <IconBase {...props}>
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M9 13.5l3-3m0 0l3 3m-3-3v9.75M4.5 18.75h15a2.25 2.25 0 002.25-2.25v-6.75a.75.75 0 10-1.5 0v6.75a.75.75 0 01-.75.75h-15a.75.75 0 01-.75-.75v-6.75a.75.75 0 10-1.5 0v6.75a2.25 2.25 0 002.25 2.25z"
+    />
+  </IconBase>
+);
+
+const ArrowDownTrayIcon: React.FC<IconProps> = (props) => (
+  <IconBase {...props}>
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M9 13.5l3 3m0 0l3-3m-3 3V6.75M4.5 18.75h15a2.25 2.25 0 002.25-2.25v-6.75a.75.75 0 10-1.5 0v6.75a.75.75 0 01-.75.75h-15a.75.75 0 01-.75-.75v-6.75a.75.75 0 10-1.5 0v6.75a2.25 2.25 0 002.25 2.25z"
+    />
+  </IconBase>
+);
+
+const ClipboardDocumentListIcon: React.FC<IconProps> = (props) => (
+  <IconBase {...props}>
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M16.5 6.75v-1.5a2.25 2.25 0 00-2.25-2.25h-4.5a2.25 2.25 0 00-2.25 2.25v1.5M6 6.75h12a2.25 2.25 0 012.25 2.25v9.75A2.25 2.25 0 0118 21H6a2.25 2.25 0 01-2.25-2.25V9A2.25 2.25 0 016 6.75zM9.75 11.25h4.5M9.75 14.25h4.5M9.75 17.25h4.5"
+    />
+  </IconBase>
+);
 
 // Robustly read climbingTime from localStorage, handling JSON-quoted values
 const readClimbingTime = (): string => {
@@ -112,8 +178,7 @@ const ControlPanel: FC = () => {
   const [timerDialogValue, setTimerDialogValue] = useState<string>('');
   const [timerDialogCriterion, setTimerDialogCriterion] = useState<boolean>(false);
   const [timerDialogError, setTimerDialogError] = useState<string | null>(null);
-  const [showAdminActionsModal, setShowAdminActionsModal] = useState<boolean>(false);
-  const [adminActionsView, setAdminActionsView] = useState<'actions' | 'upload'>('actions');
+  const [adminActionsView, setAdminActionsView] = useState<AdminActionsView>('actions');
   const [selectedAdminBoxId, setSelectedAdminBoxId] = useState<number | null>(null);
   const [showQrDialog, setShowQrDialog] = useState<boolean>(false);
   const [adminQrUrl, setAdminQrUrl] = useState<string>('');
@@ -161,7 +226,6 @@ const ControlPanel: FC = () => {
     Record<number, { message: string; type: 'info' | 'error' }>
   >({});
   const [loadingBoxes, setLoadingBoxes] = useState<LoadingBoxes>(new Set()); // TASK 3.1: Track loading operations
-  const [adminToken, setAdminToken] = useState<string | null>(() => getStoredToken());
   const [adminRole, setAdminRole] = useState<string | null>(() => getStoredRole());
   const [showAdminLogin, setShowAdminLogin] = useState<boolean>(() => {
     const t = getStoredToken();
@@ -252,8 +316,7 @@ const ControlPanel: FC = () => {
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
           clearAuth();
-          setAdminToken(null);
-          setAdminRole(null);
+                setAdminRole(null);
           setShowAdminLogin(true);
           throw new Error('auth_required');
         }
@@ -281,8 +344,7 @@ const ControlPanel: FC = () => {
           });
           if (res.status === 401) {
             clearAuth();
-            setAdminToken(null);
-            setAdminRole(null);
+                    setAdminRole(null);
             setShowAdminLogin(true);
             return;
           }
@@ -1457,8 +1519,7 @@ const ControlPanel: FC = () => {
       debugError('Failed to set judge password', err);
       if (err instanceof Error && err.message === 'auth_required') {
         clearAuth();
-        setAdminToken(null);
-        setAdminRole(null);
+            setAdminRole(null);
         setShowAdminLogin(true);
         setJudgePasswordStatus({
           type: 'error',
@@ -1473,16 +1534,6 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const closeAdminActionsModal = (): void => {
-    setShowAdminActionsModal(false);
-    setAdminActionsView('actions');
-    setShowQrDialog(false);
-    setAdminQrUrl('');
-    setShowSetPasswordDialog(false);
-    setJudgePasswordStatus(null);
-    setShowBoxTimerDialog(false);
-    setTimerDialogError(null);
-  };
 
   const openModifyScoreFromAdmin = (): void => {
     if (selectedAdminBoxId == null) return;
@@ -1591,10 +1642,10 @@ const ControlPanel: FC = () => {
 
   const handleAdminLogout = () => {
     clearAuth();
-    setAdminToken(null);
     setAdminRole(null);
     setShowAdminLogin(true);
   };
+
 
   useEffect(() => {
     // Keep selected export box in range when list changes
@@ -1615,7 +1666,6 @@ const ControlPanel: FC = () => {
   }, [listboxes.length, selectedAdminBoxId]);
 
   useEffect(() => {
-    setAdminToken(getStoredToken());
     setAdminRole(getStoredRole());
   }, []);
 
@@ -1625,83 +1675,259 @@ const ControlPanel: FC = () => {
   const adminBoxHasMarked =
     !!selectedAdminBox?.concurenti?.some((c) => c.marked);
   const canOpenListbox = adminBoxSelected || listboxes.length === 0;
+  const adminViewLabel = ADMIN_VIEW_LABELS[adminActionsView];
+  const adminSections: {
+    id: AdminActionsView;
+    label: string;
+    icon: React.FC<IconProps>;
+  }[] = [
+    { id: 'actions', label: 'Actions', icon: Squares2X2Icon },
+    { id: 'upload', label: 'Upload', icon: ArrowUpTrayIcon },
+    { id: 'export', label: 'Export', icon: ArrowDownTrayIcon },
+    { id: 'audit', label: 'Audit', icon: ClipboardDocumentListIcon },
+  ];
 
   return (
     <div className="p-6">
       {showAdminLogin && (
         <LoginOverlay
           onSuccess={() => {
-            setAdminToken(getStoredToken());
             setAdminRole(getStoredRole());
             setShowAdminLogin(false);
           }}
         />
       )}
-      <div className="w-full max-w-md mx-auto">
+      <div className="w-full">
         <h1 className="text-3xl font-bold text-center mb-6">Control Panel</h1>
-        <div className="mb-4 p-3 border border-gray-200 rounded bg-white">
-          <div className="flex items-center justify-between gap-2">
-            <div className="font-semibold">Admin</div>
-            {adminRole === 'admin' ? (
-              <button
-                className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
-                onClick={handleAdminLogout}
-                type="button"
-              >
-                Log out
-              </button>
-            ) : (
-              <button
-                className="px-3 py-1 bg-gray-900 text-white rounded hover:bg-black"
-                onClick={() => setShowAdminLogin(true)}
-                type="button"
-              >
-                Log in as admin
-              </button>
-            )}
-          </div>
-          <div className="mt-3 flex flex-col gap-2">
-            <label className="text-sm">
-              Box for official export
-              <select
-                className="mt-1 w-full border border-gray-300 rounded px-2 py-1"
-                value={exportBoxId}
-                onChange={(e) => setExportBoxId(Number(e.target.value))}
-                disabled={listboxes.length === 0}
-              >
-                {listboxes.map((b, idx) => (
-                  <option key={idx} value={idx}>
-                    {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="flex flex-wrap gap-2">
-              <button
-                className="px-3 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50"
-                onClick={handleExportOfficial}
-                disabled={listboxes.length === 0}
-                type="button"
-              >
-                Export official (ZIP)
-              </button>
-              <button
-                className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50"
-                onClick={() => setShowAdminActionsModal(true)}
-                type="button"
-              >
-                Admin actions
-              </button>
-              <Link
-                className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
-                to="/admin/audit"
-              >
-                Audit viewer
-              </Link>
+        <section className="mb-6 rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-6 py-4">
+            <div>
+              <div className="text-xl font-semibold">Admin Panel</div>
+              <div className="text-sm text-slate-600">Admin Panel &gt; {adminViewLabel}</div>
+            </div>
+            <div className="flex items-center gap-2">
+              {adminRole === 'admin' ? (
+                <button
+                  className="px-3 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
+                  onClick={handleAdminLogout}
+                  type="button"
+                >
+                  Log out
+                </button>
+              ) : (
+                <span className="text-xs text-slate-500">Login required</span>
+              )}
             </div>
           </div>
-        </div>
+
+          
+
+          <div className="md:grid md:grid-cols-[220px_1fr]">
+            <div className="border-b border-slate-200 md:border-b-0 md:border-r md:border-slate-200">
+              <div className="md:hidden px-6 py-3">
+                <label className="text-sm">
+                  Section
+                  <select
+                    className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                    value={adminActionsView}
+                    onChange={(e) => setAdminActionsView(e.target.value as AdminActionsView)}
+                    disabled={adminRole !== 'admin'}
+                  >
+                    {adminSections.map(({ id, label }) => (
+                      <option key={id} value={id}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="hidden md:block">
+                <div className="px-4 pt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                  Sections
+                </div>
+                <nav className="p-2 space-y-1">
+                  {adminSections.map(({ id, label, icon: Icon }) => {
+                    const isActive = adminActionsView === id;
+                    return (
+                      <button
+                        key={id}
+                        className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition ${
+                          isActive
+                            ? 'bg-slate-900 text-white'
+                            : 'text-slate-700 hover:bg-slate-100'
+                        }`}
+                        onClick={() => setAdminActionsView(id)}
+                        disabled={adminRole !== 'admin'}
+                        type="button"
+                      >
+                        <Icon className={isActive ? 'text-white' : 'text-slate-500'} />
+                        <span>{label}</span>
+                      </button>
+                    );
+                  })}
+                </nav>
+              </div>
+            </div>
+
+            <div className="p-6">
+              {adminRole !== 'admin' ? (
+                <div className="text-sm text-slate-500">Admin login required.</div>
+              ) : (
+                <>
+                  {adminActionsView === 'actions' && (
+                    <div className="space-y-4">
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <label className="text-sm">
+                            Box
+                            <select
+                              className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                              value={selectedAdminBoxId ?? ''}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setSelectedAdminBoxId(value === '' ? null : Number(value));
+                              }}
+                              disabled={listboxes.length === 0 || adminRole !== 'admin'}
+                            >
+                              {listboxes.length === 0 ? (
+                                <option value="">No boxes available</option>
+                              ) : (
+                                listboxes.map((b, idx) => (
+                                  <option key={idx} value={idx}>
+                                    {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
+                                  </option>
+                                ))
+                              )}
+                            </select>
+                          </label>
+                          {selectedAdminBox && (
+                            <div className="text-xs text-slate-500 flex flex-wrap gap-2">
+                              <span className="font-semibold text-slate-700">
+                                {sanitizeBoxName(selectedAdminBox.categorie || `Box ${selectedAdminBoxId}`)}
+                              </span>
+                              <span>
+                                Routes: {selectedAdminBox.routeIndex}/{selectedAdminBox.routesCount}
+                              </span>
+                              <span>Competitors: {selectedAdminBox.concurenti?.length ?? 0}</span>
+                              <span>
+                                Status: {selectedAdminBox.initiated ? 'Initiated' : 'Not initiated'}
+                              </span>
+                            </div>
+                          )}
+                          </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                        <div className="border border-slate-200 rounded-lg p-4">
+                          <div className="text-sm font-semibold text-slate-700 mb-2">Scoring</div>
+                          <div className="flex flex-col gap-2">
+                          <button
+                            className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={openModifyScoreFromAdmin}
+                            disabled={!adminBoxSelected || !adminBoxHasMarked}
+                            type="button"
+                          >
+                            Modify score
+                          </button>
+                          <button
+                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={openCeremonyFromAdmin}
+                            disabled={!adminBoxSelected}
+                            type="button"
+                          >
+                            Award ceremony
+                          </button>
+                          </div>
+                        </div>
+
+                        <div className="border border-slate-200 rounded-lg p-4">
+                          <div className="text-sm font-semibold text-slate-700 mb-2">Judge access</div>
+                          <div className="flex flex-col gap-2">
+                          <button
+                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={openJudgeViewFromAdmin}
+                            disabled={!adminBoxSelected || !selectedAdminBox?.initiated}
+                            type="button"
+                          >
+                            Open judge view
+                          </button>
+                          <button
+                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={() => {
+                              if (selectedAdminBoxId == null) return;
+                              openQrDialog(selectedAdminBoxId);
+                            }}
+                            disabled={!adminBoxSelected}
+                            type="button"
+                          >
+                            Generate QR
+                          </button>
+                          <button
+                            className="px-3 py-2 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={() => {
+                              if (selectedAdminBoxId == null) return;
+                              openSetJudgePasswordDialog(selectedAdminBoxId);
+                            }}
+                            disabled={!adminBoxSelected}
+                            type="button"
+                          >
+                            Set judge password
+                          </button>
+                          </div>
+                        </div>
+
+                        <div className="border border-slate-200 rounded-lg p-4">
+                          <div className="text-sm font-semibold text-slate-700 mb-2">Setup</div>
+                          <div className="flex flex-col gap-2">
+                          <button
+                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={() => openBoxTimerDialog(selectedAdminBoxId)}
+                            disabled={!adminBoxSelected}
+                            type="button"
+                          >
+                            Set timer
+                          </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {adminActionsView === 'upload' && (
+                    <ModalUpload
+                      isOpen={adminActionsView === 'upload'}
+                      onClose={() => setAdminActionsView('actions')}
+                      onUpload={handleUpload}
+                    />
+                  )}
+
+                  {adminActionsView === 'export' && (
+                    <AdminExportOfficialView
+                      listboxes={listboxes}
+                      exportBoxId={exportBoxId}
+                      onChangeExportBoxId={setExportBoxId}
+                      onExport={handleExportOfficial}
+                    />
+                  )}
+
+                  {adminActionsView === 'audit' && (
+                    <div className="h-full">
+                      <AdminAuditView
+                        className=""
+                        showOpenFullPage
+                        showBackLink={false}
+                        showLogout={false}
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </section>
       </div>
+
+
 
       <ModalModifyScore
         isOpen={showModifyModal && editList.length > 0}
@@ -1721,174 +1947,6 @@ const ControlPanel: FC = () => {
           setShowModifyModal(false);
         }}
       />
-
-      {showAdminActionsModal && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-5xl rounded-xl bg-white shadow-2xl">
-            <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-4">
-              <div>
-                <div className="text-xl font-semibold">Admin actions</div>
-                <div className="text-sm text-slate-600">
-                  Select a box to run admin tasks in one place.
-                </div>
-              </div>
-              <button
-                className="px-3 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
-                onClick={closeAdminActionsModal}
-                type="button"
-              >
-                Close
-              </button>
-            </div>
-            <div className="p-6">
-              {adminActionsView === 'actions' ? (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <div className="border border-slate-200 rounded-lg p-4 space-y-3">
-                    <div className="text-sm font-semibold text-slate-700">Box selection</div>
-                    <label className="text-sm">
-                      Select box
-                      <select
-                        className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
-                        value={selectedAdminBoxId ?? ''}
-                        onChange={(e) => {
-                          const value = e.target.value;
-                          setSelectedAdminBoxId(value === '' ? null : Number(value));
-                        }}
-                        disabled={listboxes.length === 0}
-                      >
-                        {listboxes.length === 0 ? (
-                          <option value="">No boxes available</option>
-                        ) : (
-                          listboxes.map((b, idx) => (
-                            <option key={idx} value={idx}>
-                              {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
-                            </option>
-                          ))
-                        )}
-                      </select>
-                    </label>
-                    {selectedAdminBox ? (
-                      <div className="text-sm text-slate-600">
-                        <div className="font-semibold text-slate-800">
-                          {sanitizeBoxName(selectedAdminBox.categorie || `Box ${selectedAdminBoxId}`)}
-                        </div>
-                        <div>
-                          Routes: {selectedAdminBox.routeIndex}/{selectedAdminBox.routesCount}
-                        </div>
-                        <div>Competitors: {selectedAdminBox.concurenti?.length ?? 0}</div>
-                        <div>
-                          Status: {selectedAdminBox.initiated ? 'Initiated' : 'Not initiated'}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-sm text-slate-500">
-                        Select a box to enable actions.
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="space-y-4">
-                    <div className="border border-slate-200 rounded-lg p-4">
-                      <div className="text-sm font-semibold text-slate-700 mb-2">Scoring</div>
-                      <div className="flex flex-col gap-2">
-                        <button
-                          className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                          onClick={openModifyScoreFromAdmin}
-                          disabled={!adminBoxSelected || !adminBoxHasMarked}
-                          type="button"
-                        >
-                          Modify score
-                        </button>
-                        <button
-                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                          onClick={openCeremonyFromAdmin}
-                          disabled={!adminBoxSelected}
-                          type="button"
-                        >
-                          Award ceremony
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="border border-slate-200 rounded-lg p-4">
-                      <div className="text-sm font-semibold text-slate-700 mb-2">Judge access</div>
-                      <div className="flex flex-col gap-2">
-                        <button
-                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                          onClick={openJudgeViewFromAdmin}
-                          disabled={!adminBoxSelected || !selectedAdminBox?.initiated}
-                          type="button"
-                        >
-                          Open judge view
-                        </button>
-                        <button
-                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                          onClick={() => {
-                            if (selectedAdminBoxId == null) return;
-                            openQrDialog(selectedAdminBoxId);
-                          }}
-                          disabled={!adminBoxSelected}
-                          type="button"
-                        >
-                          Generate QR
-                        </button>
-                        <button
-                          className="px-3 py-2 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                          onClick={() => {
-                            if (selectedAdminBoxId == null) return;
-                            openSetJudgePasswordDialog(selectedAdminBoxId);
-                          }}
-                          disabled={!adminBoxSelected}
-                          type="button"
-                        >
-                          Set judge password
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="border border-slate-200 rounded-lg p-4">
-                      <div className="text-sm font-semibold text-slate-700 mb-2">Setup</div>
-                      <div className="flex flex-col gap-2">
-                        <button
-                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                          onClick={() => setAdminActionsView('upload')}
-                          disabled={!canOpenListbox}
-                          type="button"
-                        >
-                          Open listbox
-                        </button>
-                        <button
-                          className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                          onClick={() => openBoxTimerDialog(selectedAdminBoxId)}
-                          disabled={!adminBoxSelected}
-                          type="button"
-                        >
-                          Set timer
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  <button
-                    className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200"
-                    onClick={() => setAdminActionsView('actions')}
-                    type="button"
-                  >
-                    Back
-                  </button>
-                  <ModalUpload
-                    isOpen={adminActionsView === 'upload'}
-                    onClose={() => setAdminActionsView('actions')}
-                    onUpload={handleUpload}
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
 
       {showQrDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
