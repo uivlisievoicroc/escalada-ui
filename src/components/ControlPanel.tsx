@@ -1141,7 +1141,15 @@ const ControlPanel: FC = () => {
       const preset = getTimerPreset(index);
       safeSetItem(`climbingTime-${index}`, preset);
       // send INIT_ROUTE via HTTP+WS
-      initRoute(index, lb.routeIndex, lb.holdsCount, lb.concurenti, preset);
+      initRoute(
+        index,
+        lb.routeIndex,
+        lb.holdsCount,
+        lb.concurenti,
+        preset,
+        lb.routesCount,
+        lb.holdsCounts,
+      );
     }
   };
 
@@ -1195,7 +1203,15 @@ const ControlPanel: FC = () => {
     if (nextRouteIndex <= updatedBox.routesCount) {
       const nextHoldsCount = updatedBox.holdsCounts[nextRouteIndex - 1];
       const nextCompetitors = updatedBox.concurenti.map((c) => ({ ...c, marked: false }));
-      initRoute(index, nextRouteIndex, nextHoldsCount, nextCompetitors, getTimerPreset(index));
+      initRoute(
+        index,
+        nextRouteIndex,
+        nextHoldsCount,
+        nextCompetitors,
+        getTimerPreset(index),
+        updatedBox.routesCount,
+        updatedBox.holdsCounts,
+      );
     }
   };
   // --- handlere globale pentru butoane optimiste ------------------
@@ -1886,6 +1902,15 @@ const ControlPanel: FC = () => {
                             type="button"
                           >
                             Set timer
+                          </button>
+                          <button
+                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200"
+                            onClick={() => {
+                              window.open(`${window.location.origin}/#/rankings`, '_blank');
+                            }}
+                            type="button"
+                          >
+                            Open public rankings
                           </button>
                           </div>
                         </div>

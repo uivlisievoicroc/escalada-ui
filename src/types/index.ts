@@ -129,6 +129,8 @@ export interface ApiCommand {
   // INIT_ROUTE fields
   routeIndex?: number;
   holdsCount?: number;
+  routesCount?: number;
+  holdsCounts?: number[];
   competitors?: Competitor[];
   categorie?: string;
   timerPreset?: string;

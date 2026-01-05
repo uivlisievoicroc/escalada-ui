@@ -6,6 +6,7 @@ import ControlPanel from './components/ControlPanel';
 import ContestPage from './components/ContestPage';
 import JudgePage from './components/JudgePage';
 import AdminAuditPage from './components/AdminAuditPage';
+import RankingsPage from './components/RankingsPage';
 
 const App: FC = () => {
   return (
@@ -15,6 +16,7 @@ const App: FC = () => {
           <Route path="/" element={<ControlPanel />} />
           <Route path="/contest/:boxId" element={<ContestPage />} />
           <Route path="/judge/:boxId" element={<JudgePage />} />
+          <Route path="/rankings" element={<RankingsPage />} />
           <Route path="/admin/audit" element={<AdminAuditPage />} />
         </Routes>
       </AppStateProvider>

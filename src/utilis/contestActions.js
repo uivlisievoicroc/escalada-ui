@@ -320,7 +320,15 @@ export async function registerTime(boxId, registeredTime) {
  * @param {string} timerPreset - Timer preset (MM:SS)
  * @throws {Error} If API request fails
  */
-export async function initRoute(boxId, routeIndex, holdsCount, competitors, timerPreset) {
+export async function initRoute(
+  boxId,
+  routeIndex,
+  holdsCount,
+  competitors,
+  timerPreset,
+  routesCount,
+  holdsCounts,
+) {
   try {
     const response = await fetchWithRetry(
       API,
@@ -332,6 +340,8 @@ export async function initRoute(boxId, routeIndex, holdsCount, competitors, time
           type: 'INIT_ROUTE',
           routeIndex,
           holdsCount,
+          routesCount,
+          holdsCounts,
           competitors,
           timerPreset,
           sessionId: getSessionId(boxId),
