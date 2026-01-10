@@ -178,8 +178,10 @@ const ControlPanel: FC = () => {
   const [timerDialogValue, setTimerDialogValue] = useState<string>('');
   const [timerDialogCriterion, setTimerDialogCriterion] = useState<boolean>(false);
   const [timerDialogError, setTimerDialogError] = useState<string | null>(null);
-  const [adminActionsView, setAdminActionsView] = useState<AdminActionsView>('actions');
-  const [selectedAdminBoxId, setSelectedAdminBoxId] = useState<number | null>(null);
+  const [adminActionsView, setAdminActionsView] = useState<AdminActionsView>('upload');
+  const [scoringBoxId, setScoringBoxId] = useState<number | null>(null);
+  const [judgeAccessBoxId, setJudgeAccessBoxId] = useState<number | null>(null);
+  const [judgePasswordBoxId, setJudgePasswordBoxId] = useState<number | null>(null);
   const [showQrDialog, setShowQrDialog] = useState<boolean>(false);
   const [adminQrUrl, setAdminQrUrl] = useState<string>('');
   const [showSetPasswordDialog, setShowSetPasswordDialog] = useState<boolean>(false);
@@ -1489,6 +1491,7 @@ const ControlPanel: FC = () => {
   const openSetJudgePasswordDialog = (boxIdx: number): void => {
     const box = listboxes[boxIdx];
     if (!box) return;
+    setJudgePasswordBoxId(boxIdx);
     if (showAdminLogin || adminRole !== 'admin') {
       setShowAdminLogin(true);
       alert('You must be logged in as admin to set the judge password.');
@@ -1552,8 +1555,8 @@ const ControlPanel: FC = () => {
 
 
   const openModifyScoreFromAdmin = (): void => {
-    if (selectedAdminBoxId == null) return;
-    const { comp, scores, times } = buildEditLists(selectedAdminBoxId);
+    if (scoringBoxId == null) return;
+    const { comp, scores, times } = buildEditLists(scoringBoxId);
     setEditList(comp);
     setEditScores(scores);
     setEditTimes(times);
@@ -1561,17 +1564,17 @@ const ControlPanel: FC = () => {
   };
 
   const openJudgeViewFromAdmin = (): void => {
-    if (selectedAdminBoxId == null) return;
-    const box = listboxes[selectedAdminBoxId];
+    if (judgeAccessBoxId == null) return;
+    const box = listboxes[judgeAccessBoxId];
     if (!box) return;
-    window.open(buildJudgeUrl(selectedAdminBoxId, box.categorie), '_blank');
+    window.open(buildJudgeUrl(judgeAccessBoxId, box.categorie), '_blank');
   };
 
   const openCeremonyFromAdmin = (): void => {
-    if (selectedAdminBoxId == null) return;
-    const box = listboxes[selectedAdminBoxId];
+    if (scoringBoxId == null) return;
+    const box = listboxes[scoringBoxId];
     if (!box) return;
-    handleCeremony(sanitizeBoxName(box.categorie || `Box ${selectedAdminBoxId}`));
+    handleCeremony(sanitizeBoxName(box.categorie || `Box ${scoringBoxId}`));
   };
 
   const handleCopyQrUrl = async (): Promise<void> => {
@@ -1598,8 +1601,6 @@ const ControlPanel: FC = () => {
     const resolved =
       typeof boxId === 'number'
         ? boxId
-        : selectedAdminBoxId != null
-        ? selectedAdminBoxId
         : listboxes.length > 0
         ? 0
         : null;
@@ -1672,33 +1673,54 @@ const ControlPanel: FC = () => {
   }, [listboxes.length, exportBoxId]);
 
   useEffect(() => {
-    if (listboxes.length === 0) {
-      setSelectedAdminBoxId(null);
+    const initiatedIds = listboxes
+      .map((lb, idx) => (lb.initiated ? idx : null))
+      .filter((idx): idx is number => idx !== null);
+    if (initiatedIds.length == 0) {
+      setScoringBoxId(null);
       return;
     }
-    if (selectedAdminBoxId == null || selectedAdminBoxId >= listboxes.length) {
-      setSelectedAdminBoxId(0);
+    if (scoringBoxId == null || !initiatedIds.includes(scoringBoxId)) {
+      setScoringBoxId(initiatedIds[0]);
     }
-  }, [listboxes.length, selectedAdminBoxId]);
+  }, [listboxes, scoringBoxId]);
+
+  useEffect(() => {
+    if (listboxes.length == 0) {
+      setJudgeAccessBoxId(null);
+      return;
+    }
+    if (judgeAccessBoxId == null || judgeAccessBoxId >= listboxes.length) {
+      setJudgeAccessBoxId(0);
+    }
+  }, [listboxes.length, judgeAccessBoxId]);
 
   useEffect(() => {
     setAdminRole(getStoredRole());
   }, []);
 
-  const selectedAdminBox =
-    selectedAdminBoxId != null ? listboxes[selectedAdminBoxId] : null;
-  const adminBoxSelected = selectedAdminBoxId != null && !!selectedAdminBox;
-  const adminBoxHasMarked =
-    !!selectedAdminBox?.concurenti?.some((c) => c.marked);
-  const canOpenListbox = adminBoxSelected || listboxes.length === 0;
+  const initiatedBoxIds = listboxes.reduce((acc, lb, idx) => {
+    if (lb.initiated) acc.push(idx);
+    return acc;
+  }, [] as number[]);
+  const scoringBox = scoringBoxId != null ? listboxes[scoringBoxId] : null;
+  const scoringBoxSelected = scoringBoxId != null && !!scoringBox;
+  const scoringBoxHasMarked =
+    !!scoringBox?.concurenti?.some((c) => c.marked);
+  const scoringEnabled = initiatedBoxIds.length > 0;
+
+  const judgeAccessBox =
+    judgeAccessBoxId != null ? listboxes[judgeAccessBoxId] : null;
+  const judgeAccessSelected = judgeAccessBoxId != null && !!judgeAccessBox;
+  const judgeAccessEnabled = listboxes.length > 0;
   const adminViewLabel = ADMIN_VIEW_LABELS[adminActionsView];
   const adminSections: {
     id: AdminActionsView;
     label: string;
     icon: React.FC<IconProps>;
   }[] = [
-    { id: 'actions', label: 'Actions', icon: Squares2X2Icon },
     { id: 'upload', label: 'Upload', icon: ArrowUpTrayIcon },
+    { id: 'actions', label: 'Actions', icon: Squares2X2Icon },
     { id: 'export', label: 'Export', icon: ArrowDownTrayIcon },
     { id: 'audit', label: 'Audit', icon: ClipboardDocumentListIcon },
   ];
@@ -1792,55 +1814,42 @@ const ControlPanel: FC = () => {
                 <>
                   {adminActionsView === 'actions' && (
                     <div className="space-y-4">
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <label className="text-sm">
-                            Box
-                            <select
-                              className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
-                              value={selectedAdminBoxId ?? ''}
-                              onChange={(e) => {
-                                const value = e.target.value;
-                                setSelectedAdminBoxId(value === '' ? null : Number(value));
-                              }}
-                              disabled={listboxes.length === 0 || adminRole !== 'admin'}
-                            >
-                              {listboxes.length === 0 ? (
-                                <option value="">No boxes available</option>
-                              ) : (
-                                listboxes.map((b, idx) => (
-                                  <option key={idx} value={idx}>
-                                    {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
-                                  </option>
-                                ))
-                              )}
-                            </select>
-                          </label>
-                          {selectedAdminBox && (
-                            <div className="text-xs text-slate-500 flex flex-wrap gap-2">
-                              <span className="font-semibold text-slate-700">
-                                {sanitizeBoxName(selectedAdminBox.categorie || `Box ${selectedAdminBoxId}`)}
-                              </span>
-                              <span>
-                                Routes: {selectedAdminBox.routeIndex}/{selectedAdminBox.routesCount}
-                              </span>
-                              <span>Competitors: {selectedAdminBox.concurenti?.length ?? 0}</span>
-                              <span>
-                                Status: {selectedAdminBox.initiated ? 'Initiated' : 'Not initiated'}
-                              </span>
-                            </div>
-                          )}
-                          </div>
-                      </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                         <div className="border border-slate-200 rounded-lg p-4">
                           <div className="text-sm font-semibold text-slate-700 mb-2">Scoring</div>
-                          <div className="flex flex-col gap-2">
+                          <label className="text-sm">
+                            Box
+                            <select
+                              className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                              value={scoringBoxId ?? ''}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setScoringBoxId(value === '' ? null : Number(value));
+                              }}
+                              disabled={!scoringEnabled}
+                            >
+                              {scoringEnabled ? (
+                                initiatedBoxIds.map((idx) => (
+                                  <option key={idx} value={idx}>
+                                    {idx} — {sanitizeBoxName(listboxes[idx].categorie || `Box ${idx}`)}
+                                  </option>
+                                ))
+                              ) : (
+                                <option value="">No initiated boxes</option>
+                              )}
+                            </select>
+                          </label>
+                          {!scoringEnabled && (
+                            <div className="text-xs text-slate-500">
+                              upload a category and initiate contest
+                            </div>
+                          )}
+                          <div className="mt-3 flex flex-col gap-2">
                           <button
                             className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
                             onClick={openModifyScoreFromAdmin}
-                            disabled={!adminBoxSelected || !adminBoxHasMarked}
+                            disabled={!scoringBoxSelected || !scoringBoxHasMarked}
                             type="button"
                           >
                             Modify score
@@ -1848,7 +1857,7 @@ const ControlPanel: FC = () => {
                           <button
                             className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
                             onClick={openCeremonyFromAdmin}
-                            disabled={!adminBoxSelected}
+                            disabled={!scoringBoxSelected}
                             type="button"
                           >
                             Award ceremony
@@ -1858,11 +1867,38 @@ const ControlPanel: FC = () => {
 
                         <div className="border border-slate-200 rounded-lg p-4">
                           <div className="text-sm font-semibold text-slate-700 mb-2">Judge access</div>
-                          <div className="flex flex-col gap-2">
+                          <label className="text-sm">
+                            Box
+                            <select
+                              className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                              value={judgeAccessBoxId ?? ''}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setJudgeAccessBoxId(value === '' ? null : Number(value));
+                              }}
+                              disabled={!judgeAccessEnabled}
+                            >
+                              {judgeAccessEnabled ? (
+                                listboxes.map((b, idx) => (
+                                  <option key={idx} value={idx}>
+                                    {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
+                                  </option>
+                                ))
+                              ) : (
+                                <option value="">No boxes available</option>
+                              )}
+                            </select>
+                          </label>
+                          {!judgeAccessEnabled && (
+                            <div className="text-xs text-slate-500">
+                              upload a category and initiate contest
+                            </div>
+                          )}
+                          <div className="mt-3 flex flex-col gap-2">
                           <button
                             className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
                             onClick={openJudgeViewFromAdmin}
-                            disabled={!adminBoxSelected || !selectedAdminBox?.initiated}
+                            disabled={!judgeAccessSelected || !judgeAccessBox?.initiated}
                             type="button"
                           >
                             Open judge view
@@ -1870,10 +1906,10 @@ const ControlPanel: FC = () => {
                           <button
                             className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
                             onClick={() => {
-                              if (selectedAdminBoxId == null) return;
-                              openQrDialog(selectedAdminBoxId);
+                              if (judgeAccessBoxId == null) return;
+                              openQrDialog(judgeAccessBoxId);
                             }}
-                            disabled={!adminBoxSelected}
+                            disabled={!judgeAccessSelected}
                             type="button"
                           >
                             Generate QR
@@ -1881,10 +1917,10 @@ const ControlPanel: FC = () => {
                           <button
                             className="px-3 py-2 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
                             onClick={() => {
-                              if (selectedAdminBoxId == null) return;
-                              openSetJudgePasswordDialog(selectedAdminBoxId);
+                              if (judgeAccessBoxId == null) return;
+                              openSetJudgePasswordDialog(judgeAccessBoxId);
                             }}
-                            disabled={!adminBoxSelected}
+                            disabled={!judgeAccessSelected}
                             type="button"
                           >
                             Set judge password
@@ -1897,8 +1933,8 @@ const ControlPanel: FC = () => {
                           <div className="flex flex-col gap-2">
                           <button
                             className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                            onClick={() => openBoxTimerDialog(selectedAdminBoxId)}
-                            disabled={!adminBoxSelected}
+                            onClick={() => openBoxTimerDialog(null)}
+                            disabled={listboxes.length === 0}
                             type="button"
                           >
                             Set timer
@@ -1961,10 +1997,10 @@ const ControlPanel: FC = () => {
         times={editTimes}
         onClose={() => setShowModifyModal(false)}
         onSubmit={(name: string, newScore: number, newTime: number | null) => {
-          if (selectedAdminBoxId == null) return;
-          persistRankingEntry(selectedAdminBoxId, name, newScore, newTime);
+          if (scoringBoxId == null) return;
+          persistRankingEntry(scoringBoxId, name, newScore, newTime);
           submitScore(
-            selectedAdminBoxId,
+            scoringBoxId,
             newScore,
             name,
             typeof newTime === 'number' ? newTime : undefined,
@@ -2074,8 +2110,8 @@ const ControlPanel: FC = () => {
                 <button
                   className="px-3 py-2 bg-amber-600 text-white rounded hover:bg-amber-700"
                   onClick={() => {
-                    if (selectedAdminBoxId == null) return;
-                    void submitJudgePassword(selectedAdminBoxId);
+                    if (judgePasswordBoxId == null) return;
+                    void submitJudgePassword(judgePasswordBoxId);
                   }}
                   type="button"
                 >
@@ -2382,13 +2418,6 @@ const ControlPanel: FC = () => {
                     Delete Listbox
                   </button>
                 </div>
-
-                <button
-                  className="mt-2 px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
-                  onClick={() => handleGenerateRankings(idx)}
-                >
-                  Generate Rankings
-                </button>
 
                 {rankingStatus[idx]?.message && (
                   <div
