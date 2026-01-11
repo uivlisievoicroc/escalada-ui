@@ -328,6 +328,7 @@ export async function initRoute(
   timerPreset,
   routesCount,
   holdsCounts,
+  categorie,
 ) {
   try {
     const response = await fetchWithRetry(
@@ -344,6 +345,7 @@ export async function initRoute(
           holdsCounts,
           competitors,
           timerPreset,
+          categorie,
           sessionId: getSessionId(boxId),
         }),
       },

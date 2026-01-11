@@ -17,7 +17,18 @@ const LoginOverlay = ({ onSuccess, defaultUsername = '' }) => {
       onSuccess?.(data);
     } catch (err) {
       debugError('Login failed', err);
-      setError('Autentificare eșuată. Verifică user/parola.');
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === 'storage_full') {
+        setError(
+          'Nu pot salva sesiunea în browser (storage plin/blocat). Șterge Local Storage/Cache pentru acest site și reîncearcă.',
+        );
+      } else if (msg.includes('invalid_credentials')) {
+        setError('Autentificare eșuată. Verifică user/parola.');
+      } else if (msg.includes('token_expired')) {
+        setError('Sesiune expirată. Reîncearcă autentificarea.');
+      } else {
+        setError('Autentificare eșuată.');
+      }
     } finally {
       setLoading(false);
     }
@@ -51,27 +62,14 @@ const LoginOverlay = ({ onSuccess, defaultUsername = '' }) => {
         <h3 style={{ margin: 0 }}>Autentificare arbitru</h3>
         <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
           <span>User</span>
-          {defaultUsername ? (
-            <div
-              style={{
-                padding: '8px 10px',
-                background: '#f3f4f6',
-                borderRadius: '8px',
-                fontWeight: 600,
-              }}
-            >
-              {defaultUsername}
-            </div>
-          ) : (
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              required
-              autoFocus
-              style={{ padding: '8px 10px' }}
-            />
-          )}
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            required
+            autoFocus={!defaultUsername}
+            style={{ padding: '8px 10px' }}
+          />
         </label>
         <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
           <span>Parolă</span>

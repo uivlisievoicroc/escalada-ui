@@ -488,10 +488,22 @@ const ContestPage: FC = () => {
       }
       if (lastTimerSyncRef.current !== remaining) {
         lastTimerSyncRef.current = remaining;
+        const token = getStoredToken();
+        const sessionId = safeGetItem(`sessionId-${boxId}`) || undefined;
+        const rawVersion = safeGetItem(`boxVersion-${boxId}`);
+        const parsedVersion = rawVersion ? parseInt(rawVersion, 10) : NaN;
+        const boxVersion = Number.isFinite(parsedVersion) ? parsedVersion : undefined;
+        if (!token || !sessionId) return;
         fetch(API_CMD, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ boxId: Number(boxId), type: 'TIMER_SYNC', remaining }),
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            boxId: Number(boxId),
+            type: 'TIMER_SYNC',
+            remaining,
+            sessionId,
+            boxVersion,
+          }),
         }).catch((err) => debugError('Failed to sync timer to backend', err));
       }
     },

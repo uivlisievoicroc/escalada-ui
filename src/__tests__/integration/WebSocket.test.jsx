@@ -37,7 +37,7 @@ describe('WebSocket Integration', () => {
   describe('Connection Lifecycle', () => {
     it('establishes WebSocket connection on Judge page load', () => {
       const boxId = 0;
-      const wsUrl = `ws://localhost:8000/ws/box/${boxId}`;
+      const wsUrl = `ws://localhost:8000/api/ws/${boxId}?token=test-token`;
 
       const ws = new WebSocket(wsUrl);
 

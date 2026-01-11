@@ -20,6 +20,13 @@ export function useWebSocketWithHeartbeat(url, onMessage) {
   }, [onMessage]);
 
   useEffect(() => {
+    if (!url) {
+      setConnected(false);
+      setWsInstance(null);
+      setWsError('');
+      return;
+    }
+
     const currentGen = ++generationRef.current;
     let cleanupCalled = false; // Track cleanup state to prevent StrictMode churn
     let reconnectTimeoutId = null;
@@ -109,9 +116,18 @@ export function useWebSocketWithHeartbeat(url, onMessage) {
           }
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           isConnectingRef.current = false;
-          debugLog('🔌 [Hook onclose] CLOSED for', url, 'timestamp:', new Date().toISOString());
+          debugLog(
+            '🔌 [Hook onclose] CLOSED for',
+            url,
+            'code:',
+            event?.code,
+            'reason:',
+            event?.reason,
+            'timestamp:',
+            new Date().toISOString(),
+          );
 
           // Check cleanup state before reconnecting
           if (cleanupCalled) {
@@ -175,7 +191,6 @@ export function useWebSocketWithHeartbeat(url, onMessage) {
     };
 
     connect();
-
     return () => {
       cleanupCalled = true; // Mark cleanup as executed FIRST to prevent race conditions
 
@@ -183,18 +198,30 @@ export function useWebSocketWithHeartbeat(url, onMessage) {
       if (currentGen === generationRef.current) {
         generationRef.current += 1;
       }
-      // Reset connecting flag so a StrictMode cleanup doesn't block next connect
-      isConnectingRef.current = false;
+
       if (reconnectTimeoutId) clearTimeout(reconnectTimeoutId);
 
-      // Only close if not in handshake; avoids "closed before established"
-      if (wsRef.current && !isConnectingRef.current) {
-        const state = wsRef.current.readyState;
-        if (state !== WebSocket.CLOSED && state !== WebSocket.CLOSING) {
-          wsRef.current.close();
+      const ws = wsRef.current;
+      wsRef.current = null;
+
+      // Avoid closing while CONNECTING; it triggers noisy "closed before established" errors.
+      // If a CONNECTING socket later opens, `cleanupCalled` causes `onopen` to close it immediately.
+      if (ws) {
+        const state = ws.readyState;
+        if (state === WebSocket.OPEN) {
+          try {
+            ws.close();
+          } catch {}
+        } else if (state !== WebSocket.CONNECTING && state !== WebSocket.CLOSING && state !== WebSocket.CLOSED) {
+          try {
+            ws.close();
+          } catch {}
         }
       }
-      wsRef.current = null;
+
+      // Reset connecting flag so a StrictMode cleanup doesn't block next connect
+      isConnectingRef.current = false;
+
       setWsInstance(null);
       setConnected(false);
     };

@@ -45,9 +45,18 @@ export async function login(username, password) {
 
   const data = await res.json();
   const token = data.access_token;
-  safeSetItem(TOKEN_KEY, token);
-  safeSetItem(ROLE_KEY, data.role || '');
-  safeSetItem(BOXES_KEY, JSON.stringify(data.boxes || []));
+  if (!token) {
+    throw new Error('Login failed');
+  }
+
+  const ok =
+    safeSetItem(TOKEN_KEY, token) &&
+    safeSetItem(ROLE_KEY, data.role || '') &&
+    safeSetItem(BOXES_KEY, JSON.stringify(data.boxes || []));
+  if (!ok) {
+    logout();
+    throw new Error('storage_full');
+  }
   return data;
 }
 
@@ -87,9 +96,18 @@ export async function magicLogin(token) {
 
   const data = await res.json();
   const access = data.access_token;
-  safeSetItem(TOKEN_KEY, access);
-  safeSetItem(ROLE_KEY, data.role || '');
-  safeSetItem(BOXES_KEY, JSON.stringify(data.boxes || []));
+  if (!access) {
+    throw new Error('Magic login failed');
+  }
+
+  const ok =
+    safeSetItem(TOKEN_KEY, access) &&
+    safeSetItem(ROLE_KEY, data.role || '') &&
+    safeSetItem(BOXES_KEY, JSON.stringify(data.boxes || []));
+  if (!ok) {
+    logout();
+    throw new Error('storage_full');
+  }
   return data;
 }
 

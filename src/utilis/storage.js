@@ -5,7 +5,25 @@ const STORAGE_PREFIX = 'escalada_';
 const getKey = (key) => `${STORAGE_PREFIX}${key}`;
 
 // Keys that can be evicted when storage is full (LRU eviction)
-const LRU_KEYS = ['timer-', 'registeredTime-', 'sessionId-', 'boxVersion-'];
+const LRU_KEYS = [
+  'listboxes',
+  'ranking-',
+  'rankingTimes-',
+  'podium-',
+  'timer-sync-',
+  'timer-',
+  'registeredTime-',
+  'sessionId-',
+  'boxVersion-',
+  'currentClimber-',
+  'climbingTime-',
+  'tick-owner-',
+  'timeCriterionEnabled-',
+  'timer-cmd',
+];
+
+// Keys that should never be evicted
+const PROTECTED_KEYS = ['authToken', 'authRole', 'authBoxes'];
 
 /**
  * Safely set item in localStorage with quota handling
@@ -23,7 +41,9 @@ export const safeSetItem = (key, value) => {
 
       // Clear oldest box-specific data (LRU eviction)
       const allKeys = Object.keys(localStorage);
-      const boxKeys = allKeys.filter((k) => LRU_KEYS.some((prefix) => k.startsWith(prefix)));
+      const boxKeys = allKeys.filter((k) =>
+        LRU_KEYS.some((prefix) => k.startsWith(prefix) || k.startsWith(getKey(prefix))),
+      );
 
       // Sort by box index (oldest = smallest index)
       boxKeys.sort((a, b) => {
@@ -49,8 +69,27 @@ export const safeSetItem = (key, value) => {
         return true;
       } catch (retryErr) {
         debugError('Still cannot save to localStorage after cleanup:', retryErr);
-        alert('Unable to save data - storage full. Please close other tabs or clear browser data.');
-        return false;
+        // Last-resort: purge non-essential Escalada keys (keep auth + key being written)
+        try {
+          const protectedKeys = new Set(PROTECTED_KEYS.map((k) => getKey(k)));
+          protectedKeys.add(getKey(key));
+
+          for (const k of Object.keys(localStorage)) {
+            if (!k.startsWith(STORAGE_PREFIX)) continue;
+            if (protectedKeys.has(k)) continue;
+            try {
+              localStorage.removeItem(k);
+            } catch {}
+          }
+
+          localStorage.setItem(getKey(key), value);
+          debugWarn(`Successfully saved after full purge: ${key}`);
+          return true;
+        } catch (purgeErr) {
+          debugError('Still cannot save to localStorage after purge:', purgeErr);
+          alert('Unable to save data - storage full. Please close other tabs or clear browser data.');
+          return false;
+        }
       }
     } else {
       debugError('localStorage error:', err);

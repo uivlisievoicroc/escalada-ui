@@ -41,6 +41,8 @@ const JudgePage: FC = () => {
   const [usedHalfHold, setUsedHalfHold] = useState<boolean>(false);
   const [currentClimber, setCurrentClimber] = useState<string>('');
   const [holdCount, setHoldCount] = useState<number>(0);
+  const progressPendingRef = useRef(false);
+  const [progressPending, setProgressPending] = useState<boolean>(false);
   const [showScoreModal, setShowScoreModal] = useState<boolean>(false);
   const [maxScore, setMaxScore] = useState<number>(0);
   const [authToken, setAuthToken] = useState<string | null>(() => getStoredToken());
@@ -139,9 +141,10 @@ const JudgePage: FC = () => {
   // Build WebSocket URL - memoized to prevent infinite render loop
   const WS_URL = useMemo(() => {
     const token = getStoredToken();
-    const url = `${WS_PROTOCOL}://${window.location.hostname}:8000/api/ws/${idx}${
-      token ? `?token=${encodeURIComponent(token)}` : ''
-    }`;
+    if (!token) {
+      return '';
+    }
+    const url = `${WS_PROTOCOL}://${window.location.hostname}:8000/api/ws/${idx}?token=${encodeURIComponent(token)}`;
     debugLog('🟡 [JudgePage] WS_URL memoized:', url);
     return url;
   }, [idx, WS_PROTOCOL, authToken]);
@@ -490,6 +493,7 @@ const JudgePage: FC = () => {
         setRegisteredTime(Number.isNaN(parsed) ? null : parsed);
       }
       const nsPrefix = storageKey('timeCriterionEnabled-');
+      if (!e.key) return;
       if (!(e.key.startsWith(nsPrefix) || e.key.startsWith('timeCriterionEnabled-'))) return;
       const key = e.key.replace(nsPrefix, 'timeCriterionEnabled-');
       const parts = key.split('-');
@@ -519,7 +523,7 @@ const JudgePage: FC = () => {
     return () => clearTimeout(t);
   }, [wsStatus]);
 
-  const pullLatestState = async (): Promise<void> => {
+  const pullLatestState = async (): Promise<any> => {
     let snapshot: any = {};
     try {
       const res = await fetch(`${API_BASE}/api/state/${idx}`, {
@@ -532,8 +536,28 @@ const JudgePage: FC = () => {
       if (res.ok) {
         snapshot = await res.json();
         applyTimerPresetSnapshot(snapshot);
+        if (snapshot.sessionId) {
+          setSessionId(idx, snapshot.sessionId);
+        }
         if (typeof snapshot.boxVersion === 'number') {
           safeSetItem(`boxVersion-${idx}`, String(snapshot.boxVersion));
+        }
+        if (typeof snapshot.initiated === 'boolean') {
+          setInitiated(!!snapshot.initiated);
+        }
+        if (typeof snapshot.holdsCount === 'number') {
+          setMaxScore(snapshot.holdsCount || 0);
+        }
+        if (typeof snapshot.currentClimber === 'string') {
+          setCurrentClimber(snapshot.currentClimber || '');
+        }
+        if (typeof snapshot.timerState === 'string') {
+          setTimerState(snapshot.timerState);
+        } else if (typeof snapshot.started === 'boolean') {
+          setTimerState(snapshot.started ? 'running' : 'idle');
+        }
+        if (typeof snapshot.holdCount === 'number') {
+          setHoldCount(snapshot.holdCount || 0);
         }
         if (typeof snapshot.remaining === 'number') {
           setTimerSeconds(snapshot.remaining);
@@ -583,25 +607,65 @@ const JudgePage: FC = () => {
   };
 
   // Handler for +1 Hold
-  const handleHoldClick = () => {
+  const handleHoldClick = async () => {
     const max = Number(maxScore ?? 0);
     const current = Number(holdCount ?? 0);
     if (max > 0 && current >= max) {
       return;
     }
-    updateProgress(idx, 1);
-    setUsedHalfHold(false);
+    if (progressPendingRef.current) return;
+    progressPendingRef.current = true;
+    setProgressPending(true);
+    try {
+      const result: any = await updateProgress(idx, 1);
+      if (result?.status === 'ignored') {
+        await pullLatestState();
+        const retry: any = await updateProgress(idx, 1);
+        if (retry?.status === 'ignored') {
+          await pullLatestState();
+        }
+        return;
+      }
+      setUsedHalfHold(false); // success
+    } catch (err) {
+      debugError('PROGRESS_UPDATE failed', err);
+      await pullLatestState();
+    } finally {
+      progressPendingRef.current = false;
+      setProgressPending(false);
+    }
   };
 
   // Handler for +0.1 Hold
-  const handleHalfHoldClick = () => {
+  const handleHalfHoldClick = async () => {
     const max = Number(maxScore ?? 0);
     const current = Number(holdCount ?? 0);
     if (max > 0 && current >= max) {
       return;
     }
-    updateProgress(idx, 0.1);
-    setUsedHalfHold(true);
+    if (progressPendingRef.current) return;
+    progressPendingRef.current = true;
+    setProgressPending(true);
+    try {
+      const result: any = await updateProgress(idx, 0.1);
+      if (result?.status === 'ignored') {
+        await pullLatestState();
+        const retry: any = await updateProgress(idx, 0.1);
+        if (retry?.status === 'ignored') {
+          await pullLatestState();
+        } else {
+          setUsedHalfHold(true);
+        }
+        return;
+      }
+      setUsedHalfHold(true); // success
+    } catch (err) {
+      debugError('PROGRESS_UPDATE failed', err);
+      await pullLatestState();
+    } finally {
+      progressPendingRef.current = false;
+      setProgressPending(false);
+    }
   };
 
   // Handler for Insert Score
@@ -710,6 +774,7 @@ const JudgePage: FC = () => {
             disabled={
               !initiated ||
               !isRunning ||
+              progressPending ||
               (Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0))
             }
             title={
@@ -732,6 +797,7 @@ const JudgePage: FC = () => {
             disabled={
               !initiated ||
               !isRunning ||
+              progressPending ||
               usedHalfHold ||
               (Number(maxScore ?? 0) > 0 && Number(holdCount ?? 0) >= Number(maxScore ?? 0))
             }

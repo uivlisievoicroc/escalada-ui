@@ -10,18 +10,19 @@ type PublicBox = {
   holdsCount?: number | null;
   holdsCounts?: number[] | null;
   currentClimber?: string | null;
+  preparingClimber?: string | null;
   timerState?: string | null;
   remaining?: number | null;
   timeCriterionEnabled?: boolean | null;
-  scoresByName?: Record<string, number[]>;
-  timesByName?: Record<string, (number | null)[]>;
+  scoresByName?: Record<string, Array<number | null | undefined>>;
+  timesByName?: Record<string, Array<number | null | undefined>>;
 };
 
 type RankingRow = {
   rank: number;
   nume: string;
-  raw: number[];
-  rawTimes: (number | null)[];
+  raw: Array<number | null | undefined>;
+  rawTimes: Array<number | null | undefined>;
   total: number;
 };
 
@@ -36,13 +37,30 @@ const API_BASE = `${API_PROTOCOL}://${window.location.hostname}:8000/api/public`
 const WS_URL = `${WS_PROTOCOL}://${window.location.hostname}:8000/api/public/ws`;
 const POLL_INTERVAL_MS = 5000;
 
+const normalizeNumericArray = (
+  arr: Array<number | null | undefined>,
+): Array<number | undefined> =>
+  Array.isArray(arr) ? arr.map((value) => (typeof value === 'number' ? value : undefined)) : [];
+
+const normalizeNumericRecord = (
+  record?: Record<string, Array<number | null | undefined>>,
+): Record<string, Array<number | undefined>> => {
+  if (!record || typeof record !== 'object') return {};
+  const normalized: Record<string, Array<number | undefined>> = {};
+  Object.entries(record).forEach(([key, arr]) => {
+    normalized[key] = normalizeNumericArray(arr);
+  });
+  return normalized;
+};
+
 const normalizeBox = (box: PublicBox): PublicBox => ({
   ...box,
   routesCount: box.routesCount ?? box.routeIndex ?? 1,
   holdsCounts: Array.isArray(box.holdsCounts) ? box.holdsCounts : [],
-  scoresByName: box.scoresByName || {},
-  timesByName: box.timesByName || {},
+  scoresByName: normalizeNumericRecord(box.scoresByName),
+  timesByName: normalizeNumericRecord(box.timesByName),
   currentClimber: box.currentClimber || '',
+  preparingClimber: box.preparingClimber || '',
   timerState: box.timerState || 'idle',
   remaining: typeof box.remaining === 'number' ? box.remaining : null,
   timeCriterionEnabled: !!box.timeCriterionEnabled,
@@ -58,19 +76,19 @@ const formatSeconds = (sec: number | null | undefined): string => {
 };
 
 const calcRankPointsPerRoute = (
-  scoresByName: Record<string, number[]>,
+  scoresByName: Record<string, Array<number | null | undefined>>,
   nRoutes: number,
 ): { rankPoints: Record<string, (number | undefined)[]>; nCompetitors: number } => {
   const rankPoints: Record<string, (number | undefined)[]> = {};
   let nCompetitors = 0;
 
   for (let r = 0; r < nRoutes; r++) {
-    const list: RankInfo[] = Object.entries(scoresByName)
-      .filter(([, arr]) => arr[r] !== undefined)
-      .map(([nume, arr]) => ({
-        nume,
-        score: arr[r],
-      }));
+    const list: RankInfo[] = [];
+    Object.entries(scoresByName).forEach(([nume, arr]) => {
+      const score = arr?.[r];
+      if (typeof score !== 'number' || !Number.isFinite(score)) return;
+      list.push({ nume, score });
+    });
 
     list.sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
@@ -123,8 +141,12 @@ const buildRankingRows = (box: PublicBox): RankingRow[] => {
   const { rankPoints, nCompetitors } = calcRankPointsPerRoute(scores, routesCount);
   const baseRows = Object.keys(rankPoints).map((nume) => {
     const rp = rankPoints[nume];
-    const raw = scores[nume] || [];
-    const rawTimes = times[nume] || [];
+    const raw = (scores[nume] || []).map((value) =>
+      typeof value === 'number' ? value : undefined,
+    );
+    const rawTimes = (times[nume] || []).map((value) =>
+      typeof value === 'number' ? value : undefined,
+    );
     const total = geomMean(rp, routesCount, nCompetitors);
     return { nume, raw, rawTimes, total };
   });
@@ -323,7 +345,7 @@ const RankingsPage: FC = () => {
                 </div>
                 <div className="text-xs text-slate-500">
                   Route {selectedBox.routeIndex}/{selectedBox.routesCount || totalRoutes} •
-                  Competitors: {selectedBox.scoresByName ? Object.keys(selectedBox.scoresByName).length : 0}
+                  Preparing for climbing: {sanitizeCompetitorName(selectedBox.preparingClimber || '—')}
                 </div>
               </div>
               <div className="text-sm text-slate-600">
@@ -381,14 +403,16 @@ const RankingsPage: FC = () => {
                           const maxHolds = Array.isArray(selectedBox.holdsCounts)
                             ? selectedBox.holdsCounts?.[i]
                             : undefined;
+                          const isScoreNumber =
+                            typeof scoreVal === 'number' && Number.isFinite(scoreVal);
                           const isTop =
+                            isScoreNumber &&
                             typeof maxHolds === 'number' &&
-                            scoreVal !== undefined &&
                             scoreVal === Number(maxHolds);
                           return (
                             <span key={i} className="px-2 text-right flex flex-col items-end leading-tight">
-                              {scoreVal !== undefined ? (isTop ? 'Top' : scoreVal.toFixed(1)) : '—'}
-                              {showTime && timeVal != null && (
+                              {isScoreNumber ? (isTop ? 'Top' : scoreVal.toFixed(1)) : '—'}
+                              {showTime && typeof timeVal === 'number' && (
                                 <span className="text-xs text-slate-500">
                                   {formatSeconds(timeVal)}
                                 </span>

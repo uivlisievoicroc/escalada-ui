@@ -29,7 +29,7 @@ import {
   getAuthHeader,
   getStoredRole,
   getStoredToken,
-  setJudgePassword,
+  setJudgePassword as setJudgePasswordApi,
 } from '../utilis/auth';
 import { downloadOfficialResultsZip } from '../utilis/backup';
 import LoginOverlay from './LoginOverlay';
@@ -1151,6 +1151,7 @@ const ControlPanel: FC = () => {
         preset,
         lb.routesCount,
         lb.holdsCounts,
+        lb.categorie,
       );
     }
   };
@@ -1213,6 +1214,7 @@ const ControlPanel: FC = () => {
         getTimerPreset(index),
         updatedBox.routesCount,
         updatedBox.holdsCounts,
+        updatedBox.categorie,
       );
     }
   };
@@ -1279,7 +1281,39 @@ const ControlPanel: FC = () => {
       if (max > 0 && current >= max) {
         return;
       }
-      await updateProgress(boxIdx, 1);
+      const result: any = await updateProgress(boxIdx, 1);
+      if (result?.status === 'ignored') {
+        try {
+          const config = getApiConfig();
+          const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+            headers: { ...getAuthHeader() },
+          });
+          if (res.status === 401 || res.status === 403) {
+            clearAuth();
+            setAdminRole(null);
+            setShowAdminLogin(true);
+            return;
+          }
+          if (res.ok) {
+            const st = await res.json();
+            if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+            if (typeof st?.boxVersion === 'number') safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+            if (typeof st?.holdCount === 'number') {
+              setHoldClicks((prev) => ({ ...prev, [boxIdx]: st.holdCount }));
+            }
+            if (typeof st?.currentClimber === 'string') {
+              setCurrentClimbers((prev) => ({ ...prev, [boxIdx]: st.currentClimber }));
+            }
+          }
+        } catch (err) {
+          debugError(`Failed to resync state after ignored PROGRESS_UPDATE for box ${boxIdx}`, err);
+        }
+
+        const retry: any = await updateProgress(boxIdx, 1);
+        if (retry?.status === 'ignored') {
+          debugWarn(`PROGRESS_UPDATE still ignored after resync (box ${boxIdx})`);
+        }
+      }
     } catch (err) {
       debugError('PROGRESS_UPDATE failed:', err);
     } finally {
@@ -1300,7 +1334,39 @@ const ControlPanel: FC = () => {
       if (max > 0 && current >= max) {
         return;
       }
-      await updateProgress(boxIdx, 0.1);
+      const result: any = await updateProgress(boxIdx, 0.1);
+      if (result?.status === 'ignored') {
+        try {
+          const config = getApiConfig();
+          const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+            headers: { ...getAuthHeader() },
+          });
+          if (res.status === 401 || res.status === 403) {
+            clearAuth();
+            setAdminRole(null);
+            setShowAdminLogin(true);
+            return;
+          }
+          if (res.ok) {
+            const st = await res.json();
+            if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+            if (typeof st?.boxVersion === 'number') safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+            if (typeof st?.holdCount === 'number') {
+              setHoldClicks((prev) => ({ ...prev, [boxIdx]: st.holdCount }));
+            }
+            if (typeof st?.currentClimber === 'string') {
+              setCurrentClimbers((prev) => ({ ...prev, [boxIdx]: st.currentClimber }));
+            }
+          }
+        } catch (err) {
+          debugError(`Failed to resync state after ignored PROGRESS_UPDATE for box ${boxIdx}`, err);
+        }
+
+        const retry: any = await updateProgress(boxIdx, 0.1);
+        if (retry?.status === 'ignored') {
+          debugWarn(`PROGRESS_UPDATE 0.1 still ignored after resync (box ${boxIdx})`);
+        }
+      }
     } catch (err) {
       debugError('PROGRESS_UPDATE 0.1 failed:', err);
     } finally {
@@ -1527,10 +1593,15 @@ const ControlPanel: FC = () => {
       return;
     }
     try {
-      await setJudgePassword(boxIdx, judgePassword, username);
+      const result = await setJudgePasswordApi(boxIdx, judgePassword, username);
+      const savedUsername = (result?.username || username).toString();
+            const alias = result?.alias ? result.alias.toString() : '';
+      const idAlias = result?.id_alias ? result.id_alias.toString() : '';
+      const aliases = [alias, idAlias].filter((v) => v && v !== savedUsername);
+      const aliasMsg = aliases.length ? ` (also works for ${aliases.join(', ')})` : '';
       setJudgePasswordStatus({
         type: 'success',
-        message: `Password set for ${username}.`,
+        message: `Password set for ${savedUsername}.${aliasMsg}`,
       });
       setJudgePassword('');
       setJudgePasswordConfirm('');
@@ -1538,7 +1609,7 @@ const ControlPanel: FC = () => {
       debugError('Failed to set judge password', err);
       if (err instanceof Error && err.message === 'auth_required') {
         clearAuth();
-            setAdminRole(null);
+        setAdminRole(null);
         setShowAdminLogin(true);
         setJudgePasswordStatus({
           type: 'error',
