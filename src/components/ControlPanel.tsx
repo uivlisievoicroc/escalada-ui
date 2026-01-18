@@ -627,12 +627,33 @@ const ControlPanel: FC = () => {
           disconnectFnsRef.current[idx]();
         }
         const ws = wsRefs.current[idx];
-        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-          try {
+        if (!ws) return;
+        try {
+          // Detach handlers to prevent reconnect loops / side effects after unmount
+          ws.onopen = null;
+          ws.onmessage = null;
+          ws.onerror = null;
+          ws.onclose = null;
+        } catch (err) {
+          debugError(`Error detaching WebSocket handlers for box ${idx}:`, err);
+        }
+        try {
+          if (ws.readyState === WebSocket.OPEN) {
             ws.close(1000, 'ControlPanel unmounting');
-          } catch (err) {
-            debugError(`Error closing WebSocket for box ${idx}:`, err);
+          } else if (ws.readyState === WebSocket.CONNECTING) {
+            // Avoid closing while CONNECTING (browser warns: "closed before established")
+            ws.addEventListener(
+              'open',
+              () => {
+                try {
+                  ws.close(1000, 'ControlPanel unmounting');
+                } catch {}
+              },
+              { once: true },
+            );
           }
+        } catch (err) {
+          debugError(`Error closing WebSocket for box ${idx}:`, err);
         }
       });
 
@@ -1224,7 +1245,39 @@ const ControlPanel: FC = () => {
     setTimerStates((prev) => ({ ...prev, [boxIdx]: 'running' }));
     clearRegisteredTime(boxIdx);
     try {
-      await startTimer(boxIdx);
+      const result: any = await startTimer(boxIdx);
+      if (result?.status === 'ignored') {
+        debugWarn(`START_TIMER ignored (box ${boxIdx}), resyncing...`);
+        try {
+          const config = getApiConfig();
+          const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+            headers: { ...getAuthHeader() },
+          });
+          if (res.status === 401 || res.status === 403) {
+            clearAuth();
+            setAdminRole(null);
+            setShowAdminLogin(true);
+            return;
+          }
+          if (res.ok) {
+            const st = await res.json();
+            if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+            if (typeof st?.boxVersion === 'number') safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+            if (typeof st?.timerState === 'string') {
+              // If timer is already running in backend, no need to retry.
+              if (st.timerState === 'running') return;
+            }
+          }
+        } catch (err) {
+          debugError(`Failed to resync state after ignored START_TIMER for box ${boxIdx}`, err);
+        }
+
+        const retry: any = await startTimer(boxIdx);
+        if (retry?.status === 'ignored') {
+          debugWarn(`START_TIMER still ignored after resync (box ${boxIdx})`);
+          setTimerStates((prev) => ({ ...prev, [boxIdx]: 'idle' }));
+        }
+      }
     } catch (err) {
       debugError('START_TIMER failed:', err);
       setTimerStates((prev) => ({ ...prev, [boxIdx]: 'idle' }));
@@ -1241,7 +1294,39 @@ const ControlPanel: FC = () => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     setTimerStates((prev) => ({ ...prev, [boxIdx]: 'paused' }));
     try {
-      await stopTimer(boxIdx);
+      const result: any = await stopTimer(boxIdx);
+      if (result?.status === 'ignored') {
+        debugWarn(`STOP_TIMER ignored (box ${boxIdx}), resyncing...`);
+        try {
+          const config = getApiConfig();
+          const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+            headers: { ...getAuthHeader() },
+          });
+          if (res.status === 401 || res.status === 403) {
+            clearAuth();
+            setAdminRole(null);
+            setShowAdminLogin(true);
+            return;
+          }
+          if (res.ok) {
+            const st = await res.json();
+            if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+            if (typeof st?.boxVersion === 'number') safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+            if (typeof st?.timerState === 'string') {
+              // If timer is already paused in backend, no need to retry.
+              if (st.timerState === 'paused') return;
+            }
+          }
+        } catch (err) {
+          debugError(`Failed to resync state after ignored STOP_TIMER for box ${boxIdx}`, err);
+        }
+
+        const retry: any = await stopTimer(boxIdx);
+        if (retry?.status === 'ignored') {
+          debugWarn(`STOP_TIMER still ignored after resync (box ${boxIdx})`);
+          setTimerStates((prev) => ({ ...prev, [boxIdx]: 'running' }));
+        }
+      }
     } catch (err) {
       debugError('STOP_TIMER failed:', err);
       setTimerStates((prev) => ({ ...prev, [boxIdx]: 'running' }));
@@ -1259,7 +1344,39 @@ const ControlPanel: FC = () => {
     setTimerStates((prev) => ({ ...prev, [boxIdx]: 'running' }));
     clearRegisteredTime(boxIdx);
     try {
-      await resumeTimer(boxIdx);
+      const result: any = await resumeTimer(boxIdx);
+      if (result?.status === 'ignored') {
+        debugWarn(`RESUME_TIMER ignored (box ${boxIdx}), resyncing...`);
+        try {
+          const config = getApiConfig();
+          const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+            headers: { ...getAuthHeader() },
+          });
+          if (res.status === 401 || res.status === 403) {
+            clearAuth();
+            setAdminRole(null);
+            setShowAdminLogin(true);
+            return;
+          }
+          if (res.ok) {
+            const st = await res.json();
+            if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+            if (typeof st?.boxVersion === 'number') safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+            if (typeof st?.timerState === 'string') {
+              // If timer is already running in backend, no need to retry.
+              if (st.timerState === 'running') return;
+            }
+          }
+        } catch (err) {
+          debugError(`Failed to resync state after ignored RESUME_TIMER for box ${boxIdx}`, err);
+        }
+
+        const retry: any = await resumeTimer(boxIdx);
+        if (retry?.status === 'ignored') {
+          debugWarn(`RESUME_TIMER still ignored after resync (box ${boxIdx})`);
+          setTimerStates((prev) => ({ ...prev, [boxIdx]: 'paused' }));
+        }
+      }
     } catch (err) {
       debugError('RESUME_TIMER failed:', err);
       setTimerStates((prev) => ({ ...prev, [boxIdx]: 'paused' }));

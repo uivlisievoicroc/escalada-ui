@@ -346,7 +346,6 @@ export async function initRoute(
           competitors,
           timerPreset,
           categorie,
-          sessionId: getSessionId(boxId),
         }),
       },
       3,

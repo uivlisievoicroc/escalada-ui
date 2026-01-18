@@ -204,7 +204,8 @@ const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: nu
 };
 
 const ContestPage: FC = () => {
-  const { boxId } = useParams<{ boxId: string }>();
+  const { boxId: boxIdParam } = useParams<{ boxId: string }>();
+  const boxId = boxIdParam!; // Route ensures this exists
   const getTimerPreset = useCallback(() => {
     const specific = safeGetItem(`climbingTime-${boxId}`);
     const global = safeGetItem('climbingTime');
@@ -276,8 +277,8 @@ const ContestPage: FC = () => {
         setHoldsCount(holdsCount);
         if (competitors?.length) {
           setClimbing(competitors[0].nume);
-          setPreparing(competitors.slice(1, 2).map((c) => c.nume));
-          setRemaining(competitors.slice(2).map((c) => c.nume));
+          setPreparing((competitors as Competitor[]).slice(1, 2).map((c: Competitor) => c.nume));
+          setRemaining((competitors as Competitor[]).slice(2).map((c: Competitor) => c.nume));
         } else {
           setClimbing('');
           setPreparing([]);
@@ -531,7 +532,7 @@ const ContestPage: FC = () => {
     setRunning(true);
     safeSetItem(`tick-owner-${boxId}`, window.name || 'tick-owner');
     safeSetItem(`timer-${boxId}`, duration.toString());
-    broadcastRemaining(duration);
+    broadcastRemaining(duration ?? 0);
   }, [broadcastRemaining, boxId, getTimerPreset]);
 
   const pauseCountdown = useCallback(() => {
@@ -666,7 +667,9 @@ const ContestPage: FC = () => {
     // Dacă exista un raf în așteptare, îl anulăm
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     tick();
-    return () => cancelAnimationFrame(rafRef.current);
+    return () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    };
   }, [running, endTimeMs, boxId, broadcastRemaining]);
 
   // T1 initialization
@@ -674,11 +677,11 @@ const ContestPage: FC = () => {
     const all = JSON.parse(safeGetItem('listboxes') || '[]');
     const box = all[boxId];
     if (!box) return;
-    const list = box.concurenti;
+    const list = box.concurenti as Competitor[];
     if (list.length > 0) {
       setClimbing(list[0].nume);
-      setPreparing(list.slice(1, 2).map((c) => c.nume));
-      setRemaining(list.slice(2).map((c) => c.nume));
+      setPreparing(list.slice(1, 2).map((c: Competitor) => c.nume));
+      setRemaining(list.slice(2).map((c: Competitor) => c.nume));
     }
     setRouteIdx(box.routeIndex || 1);
     setHoldsCount(box.holdsCount);
@@ -738,7 +741,7 @@ const ContestPage: FC = () => {
       const updatedTimes = (() => {
         const copy = { ...rankingTimesRef.current };
         if (!copy[competitorName]) copy[competitorName] = [];
-        copy[competitorName][routeIdx - 1] = submittedTime;
+        copy[competitorName][routeIdx - 1] = submittedTime ?? undefined;
         return copy;
       })();
       setRankingTimes(updatedTimes);
@@ -756,7 +759,9 @@ const ContestPage: FC = () => {
         const before = JSON.parse(safeGetItem('listboxes') || '[]');
         const boxBefore = before?.[boxId];
         if (boxBefore?.concurenti) {
-          const idx = boxBefore.concurenti.findIndex((c) => c.nume === competitorName);
+          const idx = (boxBefore.concurenti as Competitor[]).findIndex(
+            (c: Competitor) => c.nume === competitorName,
+          );
           if (idx !== -1) {
             boxBefore.concurenti[idx].marked = true;
             safeSetItem('listboxes', JSON.stringify(before));
@@ -796,7 +801,9 @@ const ContestPage: FC = () => {
         const after = JSON.parse(safeGetItem('listboxes') || '[]');
         const boxAfter = after?.[boxId];
         const totalRoutes = boxAfter ? Number(boxAfter.routesCount) : routeIdx;
-        const allMarked = boxAfter?.concurenti ? boxAfter.concurenti.every((c) => c.marked) : false;
+        const allMarked = boxAfter?.concurenti
+          ? (boxAfter.concurenti as Competitor[]).every((c: Competitor) => !!c.marked)
+          : false;
         console.log('End detection:', boxAfter.routeIndex, totalRoutes, allMarked);
         if (boxAfter && boxAfter.routeIndex === totalRoutes && allMarked) {
           setFinalized(true);
@@ -823,9 +830,9 @@ const ContestPage: FC = () => {
 
           setTimeout(() => {
             // Build club mapping: { nume: club }
-            const clubMap = {};
-            boxAfter.concurenti.forEach((c) => {
-              clubMap[c.nume] = c.club;
+            const clubMap: Record<string, string> = {};
+            (boxAfter.concurenti as Competitor[]).forEach((c: Competitor) => {
+              clubMap[c.nume] = c.club ?? '';
             });
             console.log('📦 Payload trimis la backend (setTimeout):', {
               categorie: boxAfter.categorie,
@@ -948,7 +955,7 @@ const ContestPage: FC = () => {
                 resizeHandles={['n']}
                 minConstraints={[BAR_WIDTH, 100]}
                 maxConstraints={[BAR_WIDTH, 800]}
-                onResizeStop={(e, data) => setBarHeight(data.size.height)}
+                onResizeStop={(_e: React.SyntheticEvent, data: { size: { height: number } }) => setBarHeight(data.size.height)}
               >
                 <RouteProgress
                   holds={holdsCount}
@@ -984,22 +991,22 @@ const ContestPage: FC = () => {
                 ranking,
                 routeIdx,
               );
-              const rows = Object.keys(rankPoints).map((nume) => {
+              const rows = Object.keys(rankPoints).map((nume: string) => {
                 const rp = rankPoints[nume];
                 const raw = ranking[nume] || [];
                 const rawTimes = rankingTimes[nume] || [];
                 const total = geomMean(rp, routeIdx, nCompetitors);
                 return { nume, rp, raw, rawTimes, total };
               });
-              rows.sort((a, b) => {
+              rows.sort((a: { total: number; nume: string }, b: { total: number; nume: string }) => {
                 if (a.total !== b.total) return a.total - b.total;
                 return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
               });
 
               // Calculează rank cu tie-handling
-              const withRank = [];
-              let prevTotal = null,
-                prevRank = 0;
+              const withRank: Array<typeof rows[0] & { rank: number }> = [];
+              let prevTotal: number | null = null;
+              let prevRank = 0;
               rows.forEach((row, idx) => {
                 const rank = row.total === prevTotal ? prevRank : idx + 1;
                 withRank.push({ ...row, rank });
