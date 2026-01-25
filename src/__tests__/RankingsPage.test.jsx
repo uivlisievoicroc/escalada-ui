@@ -58,9 +58,12 @@ describe('RankingsPage', () => {
       }
     });
 
-    await screen.findByText('Score(T1)');
-    const rowLabel = await screen.findByText('1. Alice');
-    const row = rowLabel.closest('div');
+    await screen.findByText('R1');
+    const standings = await screen.findByText('Standings');
+    const standingsSection = standings.closest('section');
+    expect(standingsSection).not.toBeNull();
+    const rowLabel = await within(standingsSection).findByText('Alice');
+    const row = rowLabel.closest('div[class*="grid"]');
     expect(row).not.toBeNull();
     if (row) {
       expect(within(row).getByText('—')).toBeInTheDocument();

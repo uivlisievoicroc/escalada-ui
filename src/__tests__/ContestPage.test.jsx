@@ -267,7 +267,11 @@ describe('ContestPage - JSON.parse Regression Tests', () => {
 
     expect(document.body).toBeTruthy();
   });
-  it('shows times only for top 3 when time criterion is enabled', async () => {
+
+  // SKIPPED: Ranking display with times was moved from ContestPage to RankingsPage.
+  // ContestPage now only stores ranking data internally for podium calculation.
+  // These tests should be migrated to RankingsPage.test.jsx if needed.
+  it.skip('shows times only for top 3 when time criterion is enabled', async () => {
     const listboxes = [
       {
         idx: 0,
@@ -330,7 +334,8 @@ describe('ContestPage - JSON.parse Regression Tests', () => {
     expect(screen.queryByText('03:00')).toBeNull();
   });
 
-  it('does not break ties by time and orders ties by name', async () => {
+  // SKIPPED: Ranking display with tie ordering was moved from ContestPage to RankingsPage.
+  it.skip('does not break ties by time and orders ties by name', async () => {
     const listboxes = [
       {
         idx: 0,

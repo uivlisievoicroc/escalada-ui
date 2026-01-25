@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { debugError } from '../utilis/debug';
-import { getAuthHeader } from '../utilis/auth';
 
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
 const API_BASE = `${API_PROTOCOL}://${window.location.hostname}:8000/api/admin`;
@@ -25,7 +24,8 @@ const ModalRestore = ({ isOpen, onClose, onSuccess }) => {
       const payload = JSON.parse(text);
       const res = await fetch(`${API_BASE}/restore`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
       if (res.status === 409) {

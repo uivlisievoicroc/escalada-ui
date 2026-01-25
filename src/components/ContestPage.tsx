@@ -1,12 +1,11 @@
 import React, { useEffect, useState, useRef, useCallback, FC } from 'react';
-import { ResizableBox } from 'react-resizable';
-import 'react-resizable/css/styles.css';
 import { useParams } from 'react-router-dom';
-import { debugLog, debugError } from '../utilis/debug';
+import { debugLog, debugError, debugWarn } from '../utilis/debug';
 import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
-import { sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
-import { getStoredToken } from '../utilis/auth';
-import type { Box, Competitor, RankingRow, WebSocketMessage } from '../types';
+import { sanitizeBoxName, sanitizeCompetitorName, normalizeCompetitorKey } from '../utilis/sanitize';
+import { clearAuth, isAuthenticated, magicLogin } from '../utilis/auth';
+import LoginOverlay from './LoginOverlay';
+import type { Competitor, WebSocketMessage } from '../types';
 // (WebSocket logic moved into component)
 
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
@@ -119,22 +118,52 @@ const RouteProgress: FC<RouteProgressProps> = ({
     accumulated += segs[i];
   }
   const pathD = 'M ' + points.map((p) => p.join(',')).join(' L ');
+  const trackWidth = w * 0.35;
   return (
-    <svg width={w} height={h} className="block overflow-visible">
+    <svg width={w + 20} height={h} className="block overflow-visible">
       <defs>
         <linearGradient id="progressGradient" x1="0" y1="1" x2="0" y2="0">
-          <stop offset="0%" stopColor="orange" />
-          <stop offset="100%" stopColor="black" />
+          <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.9" />
+          <stop offset="50%" stopColor="#0ea5e9" stopOpacity="0.7" />
+          <stop offset="100%" stopColor="#0f172a" stopOpacity="0.3" />
         </linearGradient>
+        <filter id="dotGlow">
+          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+          <feMerge>
+            <feMergeNode in="coloredBlur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
+        <filter id="trackGlow">
+          <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
+          <feMerge>
+            <feMergeNode in="coloredBlur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
       </defs>
+      {/* Background rail */}
+      <path
+        d={pathD}
+        fill="none"
+        stroke="rgba(255,255,255,0.08)"
+        strokeWidth={trackWidth * 1.8}
+        strokeLinecap="round"
+      />
+      {/* Active track with glow */}
       <path
         d={pathD}
         fill="none"
         stroke="url(#progressGradient)"
-        strokeWidth={w}
+        strokeWidth={trackWidth}
         strokeLinecap="round"
+        filter="url(#trackGlow)"
       />
-      <circle cx={dotX} cy={dotY} r={w * 0.75} fill="yellow" stroke="white" strokeWidth={2} />
+      {/* Climber dot with halo */}
+      <circle cx={dotX} cy={dotY} r={trackWidth * 2.2} fill="#22d3ee" opacity="0.25" />
+      <circle cx={dotX} cy={dotY} r={trackWidth * 1.8} fill="#fbbf24" filter="url(#dotGlow)" />
+      <circle cx={dotX} cy={dotY} r={trackWidth * 1.3} fill="#fde047" />
+      <circle cx={dotX} cy={dotY} r={trackWidth * 0.9} fill="#fef08a" />
     </svg>
   );
 };
@@ -206,6 +235,45 @@ const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: nu
 const ContestPage: FC = () => {
   const { boxId: boxIdParam } = useParams<{ boxId: string }>();
   const boxId = boxIdParam!; // Route ensures this exists
+
+  const [authActive, setAuthActive] = useState<boolean>(() => isAuthenticated());
+  const [showLogin, setShowLogin] = useState<boolean>(() => !isAuthenticated());
+
+  // Optional: support magic login via URL param (useful for kiosk displays)
+  useEffect(() => {
+    const readMagic = (): string | null => {
+      try {
+        const fromSearch = new URLSearchParams(window.location.search).get('magic');
+        if (fromSearch) return fromSearch;
+      } catch {
+        // ignore
+      }
+
+      // Hash router fallback: /#/contest/0?magic=...
+      try {
+        if (window.location.hash && window.location.hash.includes('?')) {
+          const [, qs] = window.location.hash.split('?');
+          return new URLSearchParams(qs).get('magic');
+        }
+      } catch {
+        // ignore
+      }
+      return null;
+    };
+
+    const magic = readMagic();
+    if (!magic) return;
+
+    (async () => {
+      try {
+        await magicLogin(magic);
+        setAuthActive(true);
+        setShowLogin(false);
+      } catch (err) {
+        debugError('[ContestPage] Magic login failed', err);
+      }
+    })();
+  }, []);
   const getTimerPreset = useCallback(() => {
     const specific = safeGetItem(`climbingTime-${boxId}`);
     const global = safeGetItem('climbingTime');
@@ -251,10 +319,12 @@ const ContestPage: FC = () => {
   useEffect(() => {
     reconnectRef.current.shouldReconnect = true;
 
-    const token = getStoredToken();
-    const url = `${WS_PROTOCOL}://${window.location.hostname}:8000/api/ws/${boxId}${
-      token ? `?token=${encodeURIComponent(token)}` : ''
-    }`;
+    if (!authActive) {
+      return;
+    }
+
+    // Token is in httpOnly cookie; WebSocket handshake will include cookies automatically.
+    const url = `${WS_PROTOCOL}://${window.location.hostname}:8000/api/ws/${boxId}`;
 
     const handleMessage = (msg: WebSocketMessage) => {
       if (msg.type === 'STATE_SNAPSHOT') {
@@ -358,8 +428,22 @@ const ContestPage: FC = () => {
         // swallow errors during handshake
       };
 
-      ws.onclose = () => {
+      ws.onclose = async (ev) => {
         if (!reconnectRef.current.shouldReconnect) return;
+
+        // Auth required or forbidden box/role: stop reconnect loop and prompt login.
+        if (ev?.code === 4401 || ev?.code === 4403) {
+          reconnectRef.current.shouldReconnect = false;
+          try {
+            await clearAuth();
+          } catch {
+            // ignore
+          }
+          setAuthActive(false);
+          setShowLogin(true);
+          return;
+        }
+
         const delay = Math.min(1000 * 2 ** reconnectRef.current.tries, 15000);
         reconnectRef.current.tries += 1;
         setTimeout(connect, delay);
@@ -405,7 +489,7 @@ const ContestPage: FC = () => {
         debugLog('[ContestPage cleanup] WebSocket close error (expected):', err);
       }
     };
-  }, [boxId, getTimerPreset]);
+  }, [boxId, getTimerPreset, authActive]);
   const [preparing, setPreparing] = useState<string[]>([]);
 
   const [climbing, setClimbing] = useState<string>('');
@@ -428,6 +512,14 @@ const ContestPage: FC = () => {
     window.addEventListener('storage', onToggle);
     return () => window.removeEventListener('storage', onToggle);
   }, [boxId]);
+
+  useEffect(() => {
+    const onResize = () => {
+      setBarHeight(window.innerHeight >= 900 ? 360 : 260);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   // Sincronizează competitorul curent în localStorage
   useEffect(() => {
@@ -470,8 +562,41 @@ const ContestPage: FC = () => {
   const [holdsCount, setHoldsCount] = useState<number>(0);
   const [currentHold, setCurrentHold] = useState<number>(0);
   const [holdsCountsAll, setHoldsCountsAll] = useState<number[]>([]);
-  const BAR_WIDTH = 20;
-  const [barHeight, setBarHeight] = useState<number>(500);
+  const BAR_WIDTH = 22;
+  const [barHeight, setBarHeight] = useState<number>(() =>
+    window.innerHeight >= 900 ? 360 : 260,
+  );
+  const readRoutesetterName = useCallback(() => {
+    // Load routesetter name for current route
+    const perRoute = safeGetItem(`routesetterName-${boxId}-${routeIdx}`);
+    const perBox = safeGetItem(`routesetterName-${boxId}`);
+    const global = safeGetItem('routesetterName');
+    return perRoute || perBox || global || '—';
+  }, [boxId, routeIdx]);
+  const [routesetterName, setRoutesetterName] = useState<string>(() => readRoutesetterName());
+  useEffect(() => {
+    setRoutesetterName(readRoutesetterName());
+  }, [readRoutesetterName]);
+
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key) return;
+      const nsPrefix = storageKey('routesetterName-');
+      if (
+        e.key === storageKey(`routesetterName-${boxId}-${routeIdx}`) ||
+        e.key === `routesetterName-${boxId}-${routeIdx}` ||
+        e.key === storageKey(`routesetterName-${boxId}`) ||
+        e.key === `routesetterName-${boxId}` ||
+        e.key === storageKey('routesetterName') ||
+        e.key === 'routesetterName' ||
+        e.key.startsWith(nsPrefix)
+      ) {
+        setRoutesetterName(readRoutesetterName());
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [boxId, routeIdx, readRoutesetterName]);
 
   const broadcastRemaining = useCallback(
     (remaining: number) => {
@@ -489,15 +614,15 @@ const ContestPage: FC = () => {
       }
       if (lastTimerSyncRef.current !== remaining) {
         lastTimerSyncRef.current = remaining;
-        const token = getStoredToken();
         const sessionId = safeGetItem(`sessionId-${boxId}`) || undefined;
         const rawVersion = safeGetItem(`boxVersion-${boxId}`);
         const parsedVersion = rawVersion ? parseInt(rawVersion, 10) : NaN;
         const boxVersion = Number.isFinite(parsedVersion) ? parsedVersion : undefined;
-        if (!token || !sessionId) return;
+        if (!sessionId) return;
         fetch(API_CMD, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({
             boxId: Number(boxId),
             type: 'TIMER_SYNC',
@@ -564,7 +689,7 @@ const ContestPage: FC = () => {
     safeSetItem(`tick-owner-${boxId}`, window.name || 'tick-owner');
   }, [boxId]);
 
-  // ===== T1 START_TIMER =====
+  // ===== R1 START_TIMER =====
   useEffect(() => {
     const onTimerCommand = (e: MessageEvent<WindowMessage>) => {
       if (+e.data?.boxId !== +boxId) return;
@@ -642,7 +767,7 @@ const ContestPage: FC = () => {
     return () => window.removeEventListener('storage', onStorage);
   }, [boxId]);
 
-  // T1 ticking loop
+  // R1 ticking loop
   useEffect(() => {
     if (!running || endTimeMs == null) return;
     const tick = () => {
@@ -672,7 +797,7 @@ const ContestPage: FC = () => {
     };
   }, [running, endTimeMs, boxId, broadcastRemaining]);
 
-  // T1 initialization
+  // R1 initialization
   useEffect(() => {
     const all = JSON.parse(safeGetItem('listboxes') || '[]');
     const box = all[boxId];
@@ -689,9 +814,9 @@ const ContestPage: FC = () => {
     setCategory(box.categorie || '');
   }, [boxId]);
 
-  // T1 response
+  // R1 response
   useEffect(() => {
-    const handleRequestT1 = (e: StorageEvent) => {
+    const handleRequestR1 = (e: StorageEvent) => {
       if (e.key === storageKey('climb_request') || e.key === 'climb_request') {
         const parsed = JSON.parse(e.newValue || '{}');
         if (parsed.type === 'REQUEST_ACTIVE_COMPETITOR' && +parsed.boxId === +boxId) {
@@ -707,13 +832,13 @@ const ContestPage: FC = () => {
         }
       }
     };
-    window.addEventListener('storage', handleRequestT1);
-    return () => window.removeEventListener('storage', handleRequestT1);
+    window.addEventListener('storage', handleRequestR1);
+    return () => window.removeEventListener('storage', handleRequestR1);
   }, [boxId, climbing]);
 
-  // T1 specific logic
+  // R1 specific logic
   useEffect(() => {
-    const handleMessageT1 = (e: MessageEvent<WindowMessage>) => {
+    const handleMessageR1 = (e: MessageEvent<WindowMessage>) => {
       if (e.data?.type !== 'SUBMIT_SCORE' || +e.data.boxId !== +boxId) return;
 
       const competitorName = e.data.competitor;
@@ -754,22 +879,31 @@ const ContestPage: FC = () => {
       // reset progress bar after score submission
       setCurrentHold(0);
 
-      // 2. Mark competitor in localStorage
-      try {
-        const before = JSON.parse(safeGetItem('listboxes') || '[]');
-        const boxBefore = before?.[boxId];
-        if (boxBefore?.concurenti) {
-          const idx = (boxBefore.concurenti as Competitor[]).findIndex(
-            (c: Competitor) => c.nume === competitorName,
-          );
-          if (idx !== -1) {
-            boxBefore.concurenti[idx].marked = true;
-            safeSetItem('listboxes', JSON.stringify(before));
-          }
-        }
-      } catch (err) {
-        debugError('Failed to update localStorage listboxes after submit', err);
-      }
+	      // 2. Mark competitor in localStorage
+	      try {
+	        const before = JSON.parse(safeGetItem('listboxes') || '[]');
+	        const boxBefore = before?.[boxId];
+	        if (boxBefore?.concurenti) {
+	          const competitors = boxBefore.concurenti as Competitor[];
+	          let idx = competitors.findIndex((c: Competitor) => c.nume === competitorName);
+	          if (idx === -1) {
+	            const target = normalizeCompetitorKey(competitorName);
+	            if (target) {
+	              idx = competitors.findIndex(
+	                (c: Competitor) => normalizeCompetitorKey(c.nume) === target,
+	              );
+	            }
+	          }
+	          if (idx !== -1) {
+	            boxBefore.concurenti[idx].marked = true;
+	            safeSetItem('listboxes', JSON.stringify(before));
+	          } else {
+	            debugWarn('[ContestPage] Failed to match competitor for marking:', competitorName);
+	          }
+	        }
+	      } catch (err) {
+	        debugError('Failed to update localStorage listboxes after submit', err);
+	      }
 
       // 3. Advance only if modifying the current competitor who just climbed
       if (competitorName === climbingRef.current) {
@@ -865,8 +999,8 @@ const ContestPage: FC = () => {
         }
       }
     };
-    window.addEventListener('message', handleMessageT1);
-    return () => window.removeEventListener('message', handleMessageT1);
+    window.addEventListener('message', handleMessageR1);
+    return () => window.removeEventListener('message', handleMessageR1);
   }, [
     boxId,
     climbing,
@@ -878,185 +1012,210 @@ const ContestPage: FC = () => {
     routeIdx,
   ]);
 
-  const rankClass = (rank: number): string => {
-    if (!finalized) return '';
-    switch (rank) {
-      case 1:
-        return 'bg-gradient-to-r from-yellow-800 via-yellow-350 to-yellow-400 animate-pulse font-extrabold italic text-white';
-      case 2:
-        return 'bg-gray-500 font-bold text-white';
-      case 3:
-        return 'bg-amber-600  text-white';
-      default:
-        return '';
-    }
-  };
   return (
-    <div className="h-screen grid grid-rows-[auto_1fr] bg-gray-50">
-      {/* Header */}
-      <header className="row-span-1 bg-white shadow-sm flex items-center justify-center">
-        <h1 className="text-4xl font-extrabold">{sanitizeBoxName(category)}</h1>
+    <>
+      {showLogin && (
+        <LoginOverlay
+          defaultUsername="viewer"
+          onSuccess={() => {
+            setAuthActive(true);
+            setShowLogin(false);
+          }}
+        />
+      )}
+      <div className="h-screen overflow-hidden md:overflow-y-auto bg-gradient-to-br from-[#05060a] via-[#0b1220] to-[#0f172a] text-slate-100 flex flex-col">
+      <header className="max-w-7xl mx-auto px-6 py-2 flex items-center justify-between border-b border-white/10 flex-shrink-0">
+        <div className="space-y-1">
+          <p className="text-xs uppercase tracking-[0.28em] text-cyan-200/80">Contest</p>
+          <h1 className="text-2xl md:text-3xl font-black text-white">{sanitizeBoxName(category)}</h1>
+        </div>
+        <div className="flex items-center gap-3 text-sm">
+          <span className="px-3 py-1 rounded-full bg-cyan-500/15 border border-cyan-300/40 text-cyan-200">
+            T{routeIdx} • {holdsCount || 0} holds
+          </span>
+          {finalized && (
+            <span className="px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-300/40 text-emerald-200">
+              Finalized
+            </span>
+          )}
+        </div>
       </header>
 
-      <div className="row-span-1 grid grid-cols-12 gap-4 p-4">
-        {/* Left column: Preparing + Climbing */}
-        <div className="col-span-5 flex flex-col gap-4">
-          {/* Preparing */}
-          <aside className="bg-white rounded-lg shadow-md p-6 flex flex-col">
-            <h2 className="text-4xl font-semibold mb-4">Preparing</h2>
-            <ul className="space-y-2 flex-1 overflow-y-auto text-4xl">
-              {preparing.map((n, i) => (
-                <li key={i} className="py-6 px-2 bg-gray-100 rounded">
-                  {n}
-                </li>
-              ))}
-            </ul>
-          </aside>
-
-          {/* Climbing */}
-          <main className="relative bg-gradient-to-br from-blue-700 to-blue-900 rounded-lg shadow-lg p-8 h-[43rem]">
-            <span className="text-3xl uppercase tracking-wide text-blue-200 mb-2">Climber</span>
-            <h2
-              className={`text-6xl font-extrabold text-white mb-6 ${timerSec > 0 ? 'animate-pulse' : ''}`}
-            >
-              {climbing || '—'}
-            </h2>
-            {/* Progress ring */}
-            <div className="relative w-64 h-64 mt-20 mb-6">
-              <svg className="absolute inset-0" viewBox="0 0 100 100">
-                <circle
-                  className="stroke-yellow-500 stroke-11 fill-transparent"
-                  cx="50"
-                  cy="50"
-                  r="45"
-                  strokeDasharray="283"
-                  strokeDashoffset={283 - (timerSec / totalSec) * 283}
-                  style={{ transition: 'stroke-dashoffset 1s linear' }}
+      <main className="max-w-7xl mx-auto px-6 py-3 flex-1 grid gap-4 lg:grid-cols-[1.6fr_1fr] items-start overflow-hidden md:overflow-visible">
+        <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur">
+          <div
+            className="absolute inset-0 opacity-70 bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,0.14),transparent_35%),radial-gradient(circle_at_80%_0%,rgba(14,165,233,0.18),transparent_40%)]"
+            aria-hidden
+          />
+          <div className="relative flex flex-col items-center gap-4 p-6 h-full overflow-hidden">
+            {/* Climber name - DOMINANT element with spotlight */}
+            <div className="relative flex-1 flex flex-col items-center justify-center w-full">
+              {/* Spotlight behind name */}
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div 
+                  className="w-[400px] h-[200px] rounded-full opacity-20 blur-3xl"
+                  style={{
+                    background: 'radial-gradient(ellipse, rgba(34,211,238,0.5) 0%, transparent 70%)'
+                  }}
                 />
-              </svg>
-              <div
-                className={`absolute inset-0 flex items-center justify-center font-mono text-7xl ${
-                  timerSec <= 5 ? 'text-yellow-300 animate-pulse' : 'text-white'
-                }`}
-              >
-                {timerSec > 0
-                  ? `${String(Math.floor(timerSec / 60)).padStart(2, '0')}:${String(
-                      timerSec % 60,
-                    ).padStart(2, '0')}`
-                  : 'STOP!'}
+              </div>
+              
+              <div className="relative z-10 text-center space-y-3">
+                <p className="text-xs uppercase tracking-[0.28em] text-cyan-200/60">Climber</p>
+                <h2 
+                  className="text-7xl md:text-8xl font-black leading-none text-white px-8"
+                  style={{
+                    textShadow: '0 0 40px rgba(34,211,238,0.5), 0 0 20px rgba(34,211,238,0.3), 0 4px 12px rgba(0,0,0,0.8)',
+                    filter: 'drop-shadow(0 0 30px rgba(34,211,238,0.4))'
+                  }}
+                >
+                  {climbing ? sanitizeCompetitorName(climbing) : 'Waiting for athlete'}
+                </h2>
+                <p className="text-sm text-white/50 tracking-wide">
+                  Up next: {preparing[0] ? sanitizeCompetitorName(preparing[0]) : '—'}
+                </p>
               </div>
             </div>
-            {/* Route progress bar at bottom-right, resizable */}
-            <div className="absolute bottom-4 right-4">
-              <ResizableBox
-                width={BAR_WIDTH}
-                height={barHeight}
-                axis="y"
-                resizeHandles={['n']}
-                minConstraints={[BAR_WIDTH, 100]}
-                maxConstraints={[BAR_WIDTH, 800]}
-                onResizeStop={(_e: React.SyntheticEvent, data: { size: { height: number } }) => setBarHeight(data.size.height)}
-              >
-                <RouteProgress
-                  holds={holdsCount}
-                  current={currentHold}
-                  w={BAR_WIDTH}
-                  h={barHeight}
-                />
-              </ResizableBox>
+
+            {/* Climber progress (vertical) */}
+            <div className="relative flex items-center justify-center w-full">
+              <div className="flex flex-col items-center gap-2">
+                <div className="text-[10px] uppercase tracking-[0.25em] text-white/50">
+                  Route Progress
+                </div>
+                <RouteProgress holds={holdsCount} current={currentHold} w={BAR_WIDTH} h={barHeight} />
+              </div>
             </div>
-          </main>
-        </div>
 
-        {/* Ranking */}
-        <aside className="col-span-7 bg-gray-200 rounded-lg shadow-md p-6 flex flex-col h-full min-h-0">
-          {/* Head row */}
-          <div
-            className="grid gap-2 divide-x divide-gray-300 font-semibold border-b border-gray-300 pb-2 mb-2"
-            style={{ gridTemplateColumns: `1fr repeat(${routeIdx}, 1fr) 80px` }}
-          >
-            <span className="px-2">Ranking</span>
-            {Array.from({ length: routeIdx }).map((_, i) => (
-              <span key={i} className="px-2 text-right">
-                Score(T{i + 1})
-              </span>
-            ))}
-            <span className="px-2 text-right text-red-500">Total</span>
-          </div>
-
-          {/* Rows */}
-          <div className="flex-1 overflow-y-auto">
-            {(() => {
-              const { rankPoints, nCompetitors } = calcRankPointsPerRoute(
-                ranking,
-                routeIdx,
-              );
-              const rows = Object.keys(rankPoints).map((nume: string) => {
-                const rp = rankPoints[nume];
-                const raw = ranking[nume] || [];
-                const rawTimes = rankingTimes[nume] || [];
-                const total = geomMean(rp, routeIdx, nCompetitors);
-                return { nume, rp, raw, rawTimes, total };
-              });
-              rows.sort((a: { total: number; nume: string }, b: { total: number; nume: string }) => {
-                if (a.total !== b.total) return a.total - b.total;
-                return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
-              });
-
-              // Calculează rank cu tie-handling
-              const withRank: Array<typeof rows[0] & { rank: number }> = [];
-              let prevTotal: number | null = null;
-              let prevRank = 0;
-              rows.forEach((row, idx) => {
-                const rank = row.total === prevTotal ? prevRank : idx + 1;
-                withRank.push({ ...row, rank });
-                prevTotal = row.total;
-                prevRank = rank;
-              });
-
-              return withRank.map((row, rowIndex) => {
-                const showTime = timeCriterionEnabled && rowIndex < 3;
-                return (
+            {/* Timer - SECONDARY premium element */}
+            <div className="relative w-full">
+              <div className="rounded-2xl border border-white/20 bg-gradient-to-br from-white/10 to-white/5 backdrop-blur-xl shadow-2xl p-4">
+                <div className="flex flex-col items-center gap-3">
+                  {/* Timer display - 2x larger */}
                   <div
-                    key={row.nume}
-                    className={`grid gap-2 divide-x divide-gray-200 py-2 text-2xl ${rankClass(row.rank)}`}
-                    style={{ gridTemplateColumns: `1fr repeat(${routeIdx}, 1fr) 80px` }}
+                    className="font-mono text-7xl md:text-8xl font-bold tabular-nums"
+                    style={{
+                      color: timerSec <= 5 ? '#fbbf24' : '#e0f2fe',
+                      textShadow: timerSec <= 5 ? '0 0 20px rgba(251,191,36,0.6)' : '0 0 15px rgba(34,211,238,0.4)',
+                      letterSpacing: '0.05em'
+                    }}
                   >
-                    <span className="px-2 text-4xl font-semibold">
-                      {row.rank}. {sanitizeCompetitorName(row.nume)}
-                    </span>
-                    {Array.from({ length: routeIdx }).map((_, i) => {
-                      const scoreVal = row.raw[i];
-                      const timeVal = row.rawTimes[i];
-                      return (
-                        <span
-                          key={i}
-                          className="px-2 text-right flex flex-col items-end leading-tight"
-                        >
-                          {scoreVal !== undefined
-                            ? holdsCountsAll[i] && scoreVal === Number(holdsCountsAll[i])
-                              ? 'Top'
-                              : scoreVal.toFixed(1)
-                            : '—'}
-                          {timeVal != null && showTime && (
-                            <span className="text-base text-gray-600">
-                              {formatSeconds(timeVal)}
-                            </span>
-                          )}
-                        </span>
-                      );
-                    })}
-                    <span className="px-2 text-right font-mono text-red-500">
-                      {row.total.toFixed(3)}
-                    </span>
+                    {timerSec > 0
+                      ? `${String(Math.floor(timerSec / 60)).padStart(2, '0')}:${String(
+                          timerSec % 60,
+                        ).padStart(2, '0')}`
+                      : 'STOP'}
                   </div>
-                );
-              });
-            })()}
+
+                  {/* Progress bar - horizontal */}
+                  <div className="w-full max-w-md h-3 rounded-full bg-white/5 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-1000 linear ${
+                        timerSec <= 5 ? 'bg-rose-400' : 'bg-cyan-400'
+                      }`}
+                      style={{
+                        width: `${(timerSec / totalSec) * 100}%`,
+                        boxShadow: timerSec <= 5 ? '0 0 12px rgba(251,113,133,0.6)' : '0 0 12px rgba(34,211,238,0.6)'
+                      }}
+                    />
+                  </div>
+
+                  {/* Timer status indicator */}
+                  <div className="flex items-center gap-2">
+                    <span 
+                      className={`h-2 w-2 rounded-full ${
+                        running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-400'
+                      }`}
+                      style={{
+                        boxShadow: running ? '0 0 8px rgba(52,211,153,0.6)' : 'none'
+                      }}
+                    />
+                    <span className="text-sm font-medium text-white/90">
+                      {running ? 'Running' : 'Paused'}
+                    </span>
+                    {timeCriterionEnabled && (
+                      <div className="inline-flex items-center gap-1.5 px-2 py-0.5 ml-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 text-emerald-200">
+                        <span className="h-1 w-1 rounded-full bg-emerald-400 animate-pulse" />
+                        <span className="text-[10px] uppercase tracking-wider">Time tiebreak</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+
           </div>
-        </aside>
+        </section>
+
+        <section className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur p-4 flex flex-col gap-4 overflow-y-auto max-h-full">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.24em] text-cyan-200/80">Preparing</p>
+              <h3 className="text-xl font-bold text-white">On deck</h3>
+            </div>
+            <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs uppercase tracking-[0.2em] text-white/60">
+              Queue
+            </span>
+          </div>
+          <ul className="space-y-3 text-lg">
+            {preparing.length === 0 && (
+              <li className="px-4 py-3 rounded-lg border border-white/5 bg-white/5 text-white/60">No climbers in queue</li>
+            )}
+            {preparing.map((n, i) => (
+              <li
+                key={i}
+                className="px-4 py-3 rounded-lg border border-white/5 bg-white/10 flex items-center justify-between"
+              >
+                <span className="font-semibold text-white">{sanitizeCompetitorName(n)}</span>
+                <span className="text-xs text-white/60 uppercase tracking-[0.2em]">Next</span>
+              </li>
+            ))}
+          </ul>
+
+          {remaining.length > 0 && (
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-white/60 mb-2">Waiting</p>
+              <div className="flex flex-wrap gap-2">
+                {remaining.map((n, idx) => (
+                  <span
+                    key={idx}
+                    className="px-3 py-2 rounded-full border border-white/5 bg-white/5 text-sm text-white/80"
+                  >
+                    {sanitizeCompetitorName(n)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Route Info - new section */}
+          <div className="rounded-xl border border-white/10 bg-white/5 backdrop-blur p-4">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs uppercase tracking-[0.24em] text-cyan-200/80">Route Info</p>
+            </div>
+            <div className="space-y-2 text-sm">
+              <div className="flex items-center gap-2 text-white/80">
+                <span className="h-1.5 w-1.5 rounded-full bg-cyan-400/60" />
+                <span className="text-white/60">Route:</span>
+                <span className="font-semibold text-white">{routeIdx}</span>
+              </div>
+              <div className="flex items-center gap-2 text-white/80">
+                <span className="h-1.5 w-1.5 rounded-full bg-white/30" />
+                <span className="text-white/60">Holds:</span>
+                <span className="font-semibold text-white">{holdsCount || 0}</span>
+              </div>
+              <div className="flex items-center gap-2 text-white/80">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400/60" />
+                <span className="text-white/60">Routesetter:</span>
+                <span className="font-semibold text-white">{routesetterName}</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
       </div>
-    </div>
+    </>
   );
 };
 

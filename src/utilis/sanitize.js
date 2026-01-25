@@ -37,3 +37,22 @@ export const sanitizeBoxName = (name) => {
 export const sanitizeCompetitorName = (name) => {
   return sanitizeText(name);
 };
+
+/**
+ * Normalize competitor names for internal matching across FE/BE.
+ * Mirrors escalada-core InputSanitizer.sanitize_competitor_name.
+ * @param {string} name
+ * @returns {string}
+ */
+export const normalizeCompetitorKey = (name) => {
+  if (!name || typeof name !== 'string') return '';
+
+  const trimmed = name.trim().slice(0, 255).replace(/\0/g, '');
+  if (!trimmed) return '';
+
+  // Remove dangerous characters (keep Unicode letters/diacritics intact).
+  const withoutDangerous = trimmed.replace(/[<>{}\[\]\\|;()&$`"*]/g, '');
+  // Remove ASCII control chars.
+  const withoutControl = withoutDangerous.replace(/[\x00-\x1f\x7f]/g, '');
+  return withoutControl.trim();
+};

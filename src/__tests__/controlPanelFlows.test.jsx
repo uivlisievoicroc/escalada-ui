@@ -12,6 +12,18 @@ vi.mock('../utilis/debug', () => ({
   debugError: vi.fn(),
 }));
 
+// Mock auth to bypass login overlay
+vi.mock('../utilis/auth', () => ({
+  getStoredToken: () => 'fake-test-token',
+  getStoredRole: () => 'admin',
+  getStoredBoxes: () => [],
+  getAuthHeader: () => ({}),
+  isAuthenticated: () => true,
+  clearAuth: vi.fn(),
+  logout: vi.fn(),
+  login: vi.fn(),
+}));
+
 let consoleWarnSpy;
 
 function seedLocalStorageForTwoBoxes() {
@@ -87,7 +99,7 @@ describe('ControlPanel button flows', () => {
     });
 
     // Start both boxes to enable +1 Hold
-    const startButtons = await screen.findAllByText('Start Time');
+    const startButtons = await screen.findAllByText(/Start Timer/i);
     expect(startButtons.length).toBeGreaterThanOrEqual(2);
     // click for first two boxes
     await act(async () => {
@@ -126,7 +138,7 @@ describe('ControlPanel button flows', () => {
       );
     });
 
-    await screen.findAllByText('Start Time');
+    await screen.findAllByText(/Start Timer/i);
 
     expect(screen.queryByText('Register Time')).toBeNull();
   });

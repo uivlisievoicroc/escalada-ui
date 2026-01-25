@@ -1,7 +1,7 @@
 import { debugError } from './debug';
 import { safeSetItem, safeGetItem } from './storage';
 import { fetchWithRetry } from './fetch';
-import { getAuthHeader, clearAuth } from './auth';
+import { clearAuth } from './auth';
 
 // src/utilis/contestActions.js
 // Error-safe fetch wrapper with proper response validation
@@ -83,7 +83,8 @@ export async function startTimer(boxId) {
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'START_TIMER',
@@ -120,7 +121,8 @@ export async function stopTimer(boxId) {
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'STOP_TIMER',
@@ -157,7 +159,8 @@ export async function resumeTimer(boxId) {
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'RESUME_TIMER',
@@ -189,7 +192,8 @@ export async function updateProgress(boxId, delta = 1) {
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'PROGRESS_UPDATE',
@@ -221,7 +225,8 @@ export async function requestActiveCompetitor(boxId) {
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'REQUEST_ACTIVE_COMPETITOR',
@@ -255,7 +260,8 @@ export async function submitScore(boxId, score, competitor, registeredTime) {
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'SUBMIT_SCORE',
@@ -290,7 +296,8 @@ export async function registerTime(boxId, registeredTime) {
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'REGISTER_TIME',
@@ -335,7 +342,8 @@ export async function initRoute(
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'INIT_ROUTE',
@@ -371,7 +379,8 @@ export async function requestState(boxId) {
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'REQUEST_STATE',
@@ -401,7 +410,8 @@ export async function resetBox(boxId) {
       API,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'RESET_BOX',

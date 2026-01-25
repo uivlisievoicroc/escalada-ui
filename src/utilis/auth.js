@@ -3,9 +3,12 @@ import { safeGetItem, safeSetItem, safeRemoveItem } from './storage';
 
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
 const API_BASE = `${API_PROTOCOL}://${window.location.hostname}:8000`;
-const TOKEN_KEY = 'authToken';
+// Token is now in httpOnly cookie, not accessible via JS
+// Only store non-sensitive metadata in localStorage
 const ROLE_KEY = 'authRole';
 const BOXES_KEY = 'authBoxes';
+// Flag to track if user is "logged in" (cookie is set server-side)
+const AUTH_FLAG_KEY = 'authActive';
 
 const _normalizeStoredString = (v) => {
   if (v == null) return null;
@@ -13,17 +16,41 @@ const _normalizeStoredString = (v) => {
   return v;
 };
 
-export const getStoredToken = () => _normalizeStoredString(safeGetItem(TOKEN_KEY));
-/** @returns {Record<string, string>} */
+/**
+ * Check if user appears to be authenticated.
+ * Note: The actual token is in httpOnly cookie (not accessible via JS).
+ * This flag is just for UI state; server validates the real token.
+ */
+export const isAuthenticated = () => _normalizeStoredString(safeGetItem(AUTH_FLAG_KEY)) === 'true';
+
+/**
+ * @deprecated Token is now in httpOnly cookie. Use credentials: 'include' instead.
+ * Returns empty object for backwards compatibility during migration.
+ */
 export const getAuthHeader = () => {
-  const token = getStoredToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  // During migration, return empty - all requests should use credentials: 'include'
+  return {};
 };
 
-export const logout = () => {
-  safeRemoveItem(TOKEN_KEY);
+/**
+ * @deprecated Token is now in httpOnly cookie.
+ */
+export const getStoredToken = () => null;
+
+export const logout = async () => {
+  // Clear server-side cookie
+  try {
+    await fetch(`${API_BASE}/api/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+  } catch {
+    // Ignore network errors during logout
+  }
+  // Clear local state
   safeRemoveItem(ROLE_KEY);
   safeRemoveItem(BOXES_KEY);
+  safeRemoveItem(AUTH_FLAG_KEY);
 };
 
 export async function login(username, password) {
@@ -32,6 +59,7 @@ export async function login(username, password) {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include', // Important: allows cookie to be set
       body: JSON.stringify({ username, password }),
     },
     1,
@@ -44,26 +72,21 @@ export async function login(username, password) {
   }
 
   const data = await res.json();
-  const token = data.access_token;
-  if (!token) {
-    throw new Error('Login failed');
-  }
 
+  // Store non-sensitive metadata only (token is in httpOnly cookie)
   const ok =
-    safeSetItem(TOKEN_KEY, token) &&
+    safeSetItem(AUTH_FLAG_KEY, 'true') &&
     safeSetItem(ROLE_KEY, data.role || '') &&
     safeSetItem(BOXES_KEY, JSON.stringify(data.boxes || []));
   if (!ok) {
-    logout();
+    await logout();
     throw new Error('storage_full');
   }
   return data;
 }
 
-export const clearAuth = () => {
-  safeRemoveItem(TOKEN_KEY);
-  safeRemoveItem(ROLE_KEY);
-  safeRemoveItem(BOXES_KEY);
+export const clearAuth = async () => {
+  await logout();
 };
 
 export const getStoredRole = () => _normalizeStoredString(safeGetItem(ROLE_KEY));
@@ -83,6 +106,7 @@ export async function magicLogin(token) {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ token }),
     },
     1,
@@ -95,17 +119,13 @@ export async function magicLogin(token) {
   }
 
   const data = await res.json();
-  const access = data.access_token;
-  if (!access) {
-    throw new Error('Magic login failed');
-  }
 
   const ok =
-    safeSetItem(TOKEN_KEY, access) &&
+    safeSetItem(AUTH_FLAG_KEY, 'true') &&
     safeSetItem(ROLE_KEY, data.role || '') &&
     safeSetItem(BOXES_KEY, JSON.stringify(data.boxes || []));
   if (!ok) {
-    logout();
+    await logout();
     throw new Error('storage_full');
   }
   return data;
@@ -114,7 +134,11 @@ export async function magicLogin(token) {
 export async function generateMagicToken(boxId) {
   const res = await fetchWithRetry(
     `${API_BASE}/api/admin/auth/boxes/${boxId}/magic-token`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeader() } },
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    },
     1,
     5000,
   );
@@ -130,7 +154,8 @@ export async function setJudgePassword(boxId, password, username) {
     `${API_BASE}/api/admin/auth/boxes/${boxId}/password`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ password, username }),
     },
     1,
@@ -138,7 +163,7 @@ export async function setJudgePassword(boxId, password, username) {
   );
   if (!res.ok) {
     if (res.status === 401 || res.status === 403) {
-      clearAuth();
+      await clearAuth();
       throw new Error('auth_required');
     }
     const errTxt = await res.text();

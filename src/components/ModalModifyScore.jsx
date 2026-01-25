@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import styles from './ControlPanel.module.css';
 
 const ModalModifyScore = ({ isOpen, competitors, scores, times = {}, onClose, onSubmit }) => {
   const [selected, setSelected] = useState('');
@@ -42,26 +43,19 @@ const ModalModifyScore = ({ isOpen, competitors, scores, times = {}, onClose, on
   if (!isOpen) return null;
 
   return (
-    <div className="absolute bg-gray-500 bg-opacity-75 flex items-center justify-center inset-0 z-50">
-      <div className="bg-white p-4 rounded shadow-md w-72">
-        <h2 className="text-lg font-semibold mb-3">Modify score</h2>
-        <div className="mb-4">
-          <label className="block mb-1 font-semibold">Select competitor</label>
-          <select
-            className="w-full border p-2 rounded"
-            value={selected}
-            onChange={(e) => setSelected(e.target.value)}
-          >
-            {competitors.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-        </div>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
+    <div className={styles.modalOverlay}>
+      <div className={styles.modalCard}>
+	        <div className={styles.modalHeader}>
+	          <div>
+	            <div className={styles.modalTitle}>Modify score</div>
+	            <div className={styles.modalSubtitle}>
+	              Update competitor score and time
+	            </div>
+	          </div>
+	        </div>
+	        <form
+	          onSubmit={(e) => {
+	            e.preventDefault();
             const numericScore = parseFloat(score);
             if (isNaN(numericScore)) {
               alert('Invalid score');
@@ -77,33 +71,52 @@ const ModalModifyScore = ({ isOpen, competitors, scores, times = {}, onClose, on
             setScore('');
             setTimeValue('');
           }}
+          className={styles.modalContent}
         >
-          <label className="block mb-1 font-semibold">Score</label>
-          <input
-            className="w-full border p-2 rounded"
-            type="number"
-            step="0.1"
-            id="modify-score-input"
-            name="score"
-            value={score}
-            onChange={(e) => setScore(e.target.value)}
-            required
-          />
-          <label className="block mb-1 font-semibold mt-3">Time (mm:ss, optional)</label>
-          <input
-            className="w-full border p-2 rounded"
-            type="text"
-            placeholder="mm:ss"
-            id="modify-time-input"
-            name="time"
-            value={timeValue}
-            onChange={(e) => setTimeValue(e.target.value)}
-          />
-          <div className="mt-4 flex justify-end gap-2">
-            <button type="button" className="px-4 py-1 border rounded" onClick={onClose}>
+          <div className={styles.modalField}>
+            <label className={styles.modalLabel}>Select competitor</label>
+            <select
+              className={styles.modalSelect}
+              value={selected}
+              onChange={(e) => setSelected(e.target.value)}
+            >
+              {competitors.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className={styles.modalField}>
+            <label className={styles.modalLabel}>Score</label>
+            <input
+              className={styles.modalInput}
+              type="number"
+              step="0.1"
+              id="modify-score-input"
+              name="score"
+              value={score}
+              onChange={(e) => setScore(e.target.value)}
+              required
+            />
+          </div>
+          <div className={styles.modalField}>
+            <label className={styles.modalLabel}>Time (mm:ss, optional)</label>
+            <input
+              className={styles.modalInput}
+              type="text"
+              placeholder="mm:ss"
+              id="modify-time-input"
+              name="time"
+              value={timeValue}
+              onChange={(e) => setTimeValue(e.target.value)}
+            />
+          </div>
+          <div className={styles.modalActions}>
+            <button type="button" className="modern-btn modern-btn-ghost" onClick={onClose}>
               Cancel
             </button>
-            <button type="submit" className="px-4 py-1 bg-blue-600 text-white rounded">
+            <button type="submit" className="modern-btn modern-btn-primary">
               Save
             </button>
           </div>

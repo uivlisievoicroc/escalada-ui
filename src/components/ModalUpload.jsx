@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { debugLog, debugError } from '../utilis/debug';
-import { getAuthHeader, clearAuth } from '../utilis/auth';
+import { clearAuth } from '../utilis/auth';
+import styles from './ControlPanel.module.css';
+
 // NOTE: admin-only route now under /api/admin
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
 const API_BASE = `${API_PROTOCOL}://${window.location.hostname}:8000/api/admin`;
@@ -34,7 +36,7 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
 
       const res = await fetch(`${API_BASE}/upload`, {
         method: 'POST',
-        headers: { ...getAuthHeader() },
+        credentials: 'include',
         body: formData,
       });
 
@@ -75,78 +77,106 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
   if (!isOpen) return null;
 
   return (
-    <div className="mt-4 p-6 bg-white border border-gray-300 rounded shadow-md max-w-md mx-auto">
-      <h2 className="text-xl font-semibold mb-4">Upload Listbox</h2>
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <input
-          type="text"
-          id="upload-category"
-          name="category"
-          placeholder="Category (e.g. U16-Boys)"
-          value={category}
-          onChange={(e) => setCategory(e.target.value)}
-          className="w-full border border-gray-300 p-2 rounded"
-          required
-        />
-        {/* Number of routes */}
-        <input
-          type="number"
-          min="1"
-          id="upload-routes-count"
-          name="routesCount"
-          placeholder="Number of routes"
-          value={routesCount}
-          onChange={(e) => {
-            const val = e.target.value;
-            setRoutesCount(val);
-            setHoldsCounts(Array(Number(val)).fill(''));
-          }}
-          className="w-full border border-gray-300 p-2 rounded"
-          required
-        />
-        {/* Holds per route */}
-        {routesCount &&
-          Array.from({ length: Number(routesCount) }).map((_, i) => (
-            <input
-              key={i}
-              type="number"
-              min="1"
-              id={`upload-holds-${i + 1}`}
-              name={`holdsRoute${i + 1}`}
-              placeholder={`Number of holds, Route ${i + 1}`}
-              value={holdsCounts[i] || ''}
-              onChange={(e) => {
-                const newCounts = [...holdsCounts];
-                newCounts[i] = e.target.value;
-                setHoldsCounts(newCounts);
-              }}
-              className="w-full border border-gray-300 p-2 rounded"
-              required
-            />
-          ))}
-        <input
-          type="file"
-          accept=".xlsx"
-          onChange={(e) => setFile(e.target.files[0])}
-          className="w-full"
-          required
-        />
-        <div className="flex justify-end space-x-2">
+    <div className={styles.modalOverlay}>
+      <div className={styles.modalCard}>
+        <div className={styles.modalHeader}>
+          <div>
+            <div className={styles.modalTitle}>Upload Listbox</div>
+            <div className={styles.modalSubtitle}>
+              Upload an Excel file with competitor data
+            </div>
+          </div>
           <button
-            type="button"
+            className="modern-btn modern-btn-sm modern-btn-ghost"
             onClick={onClose}
-            className="px-3 py-1 border border-gray-400 rounded"
+            type="button"
           >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
-          >
-            Upload
+            Close
           </button>
         </div>
-      </form>
+        <form onSubmit={handleSubmit} className={styles.modalContent}>
+          <div className={styles.modalField}>
+            <label className={styles.modalLabel}>Category</label>
+            <input
+              type="text"
+              id="upload-category"
+              name="category"
+              placeholder="Category (e.g. U16-Boys)"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className={styles.modalInput}
+              required
+            />
+          </div>
+          {/* Number of routes */}
+          <div className={styles.modalField}>
+            <label className={styles.modalLabel}>Number of routes</label>
+            <input
+              type="number"
+              min="1"
+              id="upload-routes-count"
+              name="routesCount"
+              placeholder="Number of routes"
+              value={routesCount}
+              onChange={(e) => {
+                const val = e.target.value;
+                setRoutesCount(val);
+                setHoldsCounts(Array(Number(val)).fill(''));
+              }}
+              className={styles.modalInput}
+              required
+            />
+          </div>
+          {/* Holds per route */}
+          {routesCount &&
+            Array.from({ length: Number(routesCount) }).map((_, i) => (
+              <div key={i} className={styles.modalField}>
+                <label className={styles.modalLabel}>Route {i + 1} holds</label>
+                <input
+                  type="number"
+                  min="1"
+                  id={`upload-holds-${i + 1}`}
+                  name={`holdsRoute${i + 1}`}
+                  placeholder={`Number of holds, Route ${i + 1}`}
+                  value={holdsCounts[i] || ''}
+                  onChange={(e) => {
+                    const newCounts = [...holdsCounts];
+                    newCounts[i] = e.target.value;
+                    setHoldsCounts(newCounts);
+                  }}
+                  className={styles.modalInput}
+                  required
+                />
+              </div>
+            ))}
+          <div className={styles.modalField}>
+            <label className={styles.modalLabel}>Excel file</label>
+            <input
+              type="file"
+              accept=".xlsx"
+              onChange={(e) => setFile(e.target.files[0])}
+              className={styles.modalInput}
+              style={{ padding: '8px 12px' }}
+              required
+            />
+          </div>
+          <div className={styles.modalActions}>
+            <button
+              type="button"
+              onClick={onClose}
+              className="modern-btn modern-btn-ghost"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="modern-btn modern-btn-primary"
+            >
+              Upload
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 };

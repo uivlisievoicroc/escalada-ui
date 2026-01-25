@@ -1,8 +1,9 @@
 import QRCode from 'react-qr-code';
 import React, { useState, useEffect, useRef, Suspense, lazy, FC } from 'react';
 import { debugLog, debugWarn, debugError } from '../utilis/debug';
+import styles from './ControlPanel.module.css';
 import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
-import { sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
+import { normalizeCompetitorKey, sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
 import type { Box, Competitor, WebSocketMessage, TimerState, LoadingBoxes } from '../types';
 import ModalUpload from './ModalUpload';
 import AdminExportOfficialView from './AdminExportOfficialView';
@@ -26,9 +27,8 @@ import useWebSocketWithHeartbeat from '../utilis/useWebSocketWithHeartbeat';
 import { normalizeStorageValue } from '../utilis/normalizeStorageValue';
 import {
   clearAuth,
-  getAuthHeader,
   getStoredRole,
-  getStoredToken,
+  isAuthenticated,
   setJudgePassword as setJudgePasswordApi,
 } from '../utilis/auth';
 import { downloadOfficialResultsZip } from '../utilis/backup';
@@ -181,10 +181,17 @@ const ControlPanel: FC = () => {
   const [adminActionsView, setAdminActionsView] = useState<AdminActionsView>('upload');
   const [scoringBoxId, setScoringBoxId] = useState<number | null>(null);
   const [judgeAccessBoxId, setJudgeAccessBoxId] = useState<number | null>(null);
+  const [setupBoxId, setSetupBoxId] = useState<number | null>(null);
   const [judgePasswordBoxId, setJudgePasswordBoxId] = useState<number | null>(null);
   const [showQrDialog, setShowQrDialog] = useState<boolean>(false);
   const [adminQrUrl, setAdminQrUrl] = useState<string>('');
   const [showSetPasswordDialog, setShowSetPasswordDialog] = useState<boolean>(false);
+  const [showRoutesetterDialog, setShowRoutesetterDialog] = useState<boolean>(false);
+  const [routesetterBoxId, setRoutesetterBoxId] = useState<number | null>(null);
+  const [routesetterRouteIndex, setRoutesetterRouteIndex] = useState<number>(1);
+  const [routesetterNameInput, setRoutesetterNameInput] = useState<string>('');
+  const [routesetterNamesTemp, setRoutesetterNamesTemp] = useState<Record<number, string>>({});
+  const [routesetterDialogError, setRoutesetterDialogError] = useState<string | null>(null);
   const [judgeUsername, setJudgeUsername] = useState<string>('');
   const [judgePassword, setJudgePassword] = useState<string>('');
   const [judgePasswordConfirm, setJudgePasswordConfirm] = useState<string>('');
@@ -230,9 +237,9 @@ const ControlPanel: FC = () => {
   const [loadingBoxes, setLoadingBoxes] = useState<LoadingBoxes>(new Set()); // TASK 3.1: Track loading operations
   const [adminRole, setAdminRole] = useState<string | null>(() => getStoredRole());
   const [showAdminLogin, setShowAdminLogin] = useState<boolean>(() => {
-    const t = getStoredToken();
+    const authenticated = isAuthenticated();
     const r = getStoredRole();
-    return !(t && r === 'admin');
+    return !(authenticated && r === 'admin');
   });
   const [exportBoxId, setExportBoxId] = useState<number>(0);
 
@@ -272,6 +279,13 @@ const ControlPanel: FC = () => {
     });
   }, [listboxes]);
 
+  // Auto-select first category in Setup dropdown when boxes are loaded
+  useEffect(() => {
+    if (listboxes.length > 0 && setupBoxId == null) {
+      setSetupBoxId(0);
+    }
+  }, [listboxes, setupBoxId]);
+
   // WebSocket: subscribe to each box channel and mirror updates from JudgePage
   const wsRefs = useRef<{ [boxId: string]: WebSocket }>({});
   const disconnectFnsRef = useRef<{ [boxId: string]: () => void }>({}); // TASK 2.4: Store disconnect functions for cleanup
@@ -306,7 +320,8 @@ const ControlPanel: FC = () => {
       const config = getApiConfig();
       const res = await fetch(config.API_CP, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           boxId,
           type: 'SET_TIME_CRITERION',
@@ -334,15 +349,15 @@ const ControlPanel: FC = () => {
   // Ensure we always have a fresh sessionId per box (needed for state isolation)
   useEffect(() => {
     const config = getApiConfig();
-    const authHeader = getAuthHeader();
-    if (!authHeader.Authorization) {
+    // Check if authenticated (token in httpOnly cookie)
+    if (!isAuthenticated()) {
       return;
     }
     listboxes.forEach((_, idx) => {
       (async () => {
         try {
           const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${idx}`, {
-            headers: { ...authHeader },
+            credentials: 'include',
           });
           if (res.status === 401) {
             clearAuth();
@@ -400,13 +415,15 @@ const ControlPanel: FC = () => {
               });
               setUsedHalfHold((prev) => ({ ...prev, [idx]: msg.delta === 0.1 }));
               break;
-            case 'SUBMIT_SCORE':
-              persistRankingEntry(idx, msg.competitor, msg.score, msg.registeredTime);
-              setHoldClicks((prev) => ({ ...prev, [idx]: 0 }));
-              setUsedHalfHold((prev) => ({ ...prev, [idx]: false }));
-              setTimerStates((prev) => ({ ...prev, [idx]: 'idle' }));
-              clearRegisteredTime(idx);
-              break;
+	            case 'SUBMIT_SCORE':
+	              persistRankingEntry(idx, msg.competitor, msg.score, msg.registeredTime);
+	              markCompetitorInListboxes(idx, msg.competitor);
+	              setHoldClicks((prev) => ({ ...prev, [idx]: 0 }));
+	              setUsedHalfHold((prev) => ({ ...prev, [idx]: false }));
+	              setTimerStates((prev) => ({ ...prev, [idx]: 'idle' }));
+	              setTimerSecondsForBox(idx, defaultTimerSec(idx));
+	              clearRegisteredTime(idx);
+	              break;
             case 'REGISTER_TIME':
               if (typeof msg.registeredTime === 'number') {
                 if (typeof msg.registeredTime === 'number' && !Number.isNaN(msg.registeredTime)) {
@@ -505,14 +522,13 @@ const ControlPanel: FC = () => {
         // Create WebSocket connection with heartbeat using a custom implementation
         // that manually manages the connection to fit our multi-box pattern
         const config = getApiConfig();
-        const token = getStoredToken();
-        if (!token) {
-          debugWarn(`Skipping WS connect for box ${idx}: no auth token`);
+        // Token is in httpOnly cookie - check if user appears authenticated
+        if (!isAuthenticated()) {
+          debugWarn(`Skipping WS connect for box ${idx}: not authenticated`);
           return;
         }
-        const url = `${config.WS_PROTOCOL_CP}://${window.location.hostname}:8000/api/ws/${idx}?token=${encodeURIComponent(
-          token,
-        )}`;
+        // WebSocket will use cookie for auth (no token in URL for security)
+        const url = `${config.WS_PROTOCOL_CP}://${window.location.hostname}:8000/api/ws/${idx}`;
         const ws = new WebSocket(url);
         let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
         let lastPong = Date.now();
@@ -740,33 +756,48 @@ const ControlPanel: FC = () => {
     return `${m}:${s}`;
   };
 
-  const getTimerPreset = (idx: number): string => {
-    const stored = safeGetItem(`climbingTime-${idx}`);
-    const lb = listboxesRef.current[idx] || listboxes[idx];
-    const fallback = readClimbingTime() || climbingTime || '05:00';
-    return stored || (lb && lb.timerPreset) || fallback;
-  };
+	  const getTimerPreset = (idx: number): string => {
+	    const stored = safeGetItem(`climbingTime-${idx}`);
+	    const lb = listboxesRef.current[idx] || listboxes[idx];
+	    const fallback = readClimbingTime() || climbingTime || '05:00';
+	    return stored || (lb && lb.timerPreset) || fallback;
+	  };
 
-  // convert preset MM:SS în secunde pentru un box
-  const defaultTimerSec = (idx: number) => {
-    const t = getTimerPreset(idx);
-    if (!/^\d{1,2}:\d{2}$/.test(t)) return 300;
-    const [m, s] = t.split(':').map(Number);
-    const mm = Number.isFinite(m) ? m : 5;
-    const ss = Number.isFinite(s) ? s : 0;
-    return mm * 60 + ss;
-  };
+	  const presetToSeconds = (preset: string): number => {
+	    if (!/^\d{1,2}:\d{2}$/.test(preset)) return 300;
+	    const [m, s] = preset.split(':').map(Number);
+	    const mm = Number.isFinite(m) ? m : 5;
+	    const ss = Number.isFinite(s) ? s : 0;
+	    return mm * 60 + ss;
+	  };
+
+	  // convert preset MM:SS în secunde pentru un box
+	  const defaultTimerSec = (idx: number) => {
+	    return presetToSeconds(getTimerPreset(idx));
+	  };
+
+	  const setTimerSecondsForBox = (boxId: number, seconds: number): void => {
+	    setControlTimers((prev) => ({ ...prev, [boxId]: seconds }));
+	    try {
+	      safeSetItem(`timer-${boxId}`, String(seconds));
+	    } catch (err) {
+	      debugError('Failed to persist timer seconds', err);
+	    }
+	  };
 
   interface ReadCurrentTimerSec {
     (idx: number): number | null;
   }
 
-  const readCurrentTimerSec: ReadCurrentTimerSec = (idx) => {
-    if (typeof controlTimers[idx] === 'number') return controlTimers[idx];
-    const raw = safeGetItem(`timer-${idx}`);
-    const parsed = parseInt(raw, 10);
-    return Number.isNaN(parsed) ? null : parsed;
-  };
+	  const readCurrentTimerSec: ReadCurrentTimerSec = (idx) => {
+	    const fromState = controlTimers[idx];
+	    if (typeof fromState === 'number' && Number.isFinite(fromState)) {
+	      return fromState;
+	    }
+	    const raw = safeGetItem(`timer-${idx}`);
+	    const parsed = parseInt(raw, 10);
+	    return Number.isFinite(parsed) ? parsed : null;
+	  };
 
   const clearRegisteredTime = (idx: number) => {
     setRegisteredTimes((prev) => {
@@ -780,14 +811,18 @@ const ControlPanel: FC = () => {
     }
   };
 
-  useEffect(() => {
-    // Inițializare timere din localStorage la încărcare pagină
-    const initial: { [key: number]: number } = {};
-    listboxes.forEach((_, idx) => {
-      const v = safeGetItem(`timer-${idx}`);
-      if (v != null) initial[idx] = parseInt(v);
-    });
-    setControlTimers(initial);
+	  useEffect(() => {
+	    // Inițializare timere din localStorage la încărcare pagină
+	    const initial: { [key: number]: number } = {};
+	    listboxes.forEach((_, idx) => {
+	      const v = safeGetItem(`timer-${idx}`);
+	      if (v == null) return;
+	      const parsed = parseInt(v, 10);
+	      if (Number.isFinite(parsed)) {
+	        initial[idx] = parsed;
+	      }
+	    });
+	    setControlTimers(initial);
 
     // Ascultă evenimentul 'storage' pentru sincronizare
     const handleStorage = (e: StorageEvent) => {
@@ -1132,24 +1167,33 @@ const ControlPanel: FC = () => {
     const tab = openTabs[index];
     if (tab && !tab.closed) tab.close();
     delete openTabs[index];
-    // reset local state for holds and timer
-    setHoldClicks((prev) => ({ ...prev, [index]: 0 }));
-    setUsedHalfHold((prev) => ({ ...prev, [index]: false }));
-    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
-    clearRegisteredTime(index);
-    // reset current climber highlight
-    setCurrentClimbers((prev) => ({ ...prev, [index]: '' }));
-  };
+	    // reset local state for holds and timer
+	    setHoldClicks((prev) => ({ ...prev, [index]: 0 }));
+	    setUsedHalfHold((prev) => ({ ...prev, [index]: false }));
+	    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
+	    setTimerSecondsForBox(index, defaultTimerSec(index));
+	    clearRegisteredTime(index);
+	    // reset current climber highlight
+	    setCurrentClimbers((prev) => ({ ...prev, [index]: '' }));
+	  };
 
-  const handleInitiate = (index: number): void => {
-    // 1. Marchează listbox‑ul ca inițiat
-    setListboxes((prev) => prev.map((lb, i) => (i === index ? { ...lb, initiated: true } : lb)));
-    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
-    clearRegisteredTime(index);
-    // 2. Dacă tab‑ul nu există sau s‑a închis → deschide
-    const existingTab = openTabs[index];
-    let tab: Window | null = existingTab;
-    if (!isTabAlive(existingTab)) {
+	  const handleInitiate = (index: number): void => {
+	    // 1. Marchează listbox‑ul ca inițiat
+	    setListboxes((prev) => prev.map((lb, i) => (i === index ? { ...lb, initiated: true } : lb)));
+	    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
+	    clearRegisteredTime(index);
+		    // Reset displayed timer to current preset (so header matches "Set timer" immediately).
+		    const preset = getTimerPreset(index);
+		    try {
+		      safeSetItem(`climbingTime-${index}`, preset);
+		    } catch (err) {
+		      debugError('Failed to persist climbingTime preset on initiate', err);
+		    }
+		    setTimerSecondsForBox(index, presetToSeconds(preset));
+		    // 2. Dacă tab‑ul nu există sau s‑a închis → deschide
+		    const existingTab = openTabs[index];
+	    let tab: Window | null = existingTab;
+	    if (!isTabAlive(existingTab)) {
       const url = `${window.location.origin}/#/contest/${index}`;
       tab = window.open(url, '_blank');
       if (tab) openTabs[index] = tab;
@@ -1158,15 +1202,14 @@ const ControlPanel: FC = () => {
       existingTab?.focus();
     }
 
-    // 3. Trimite mesaj de (re)inițiere pentru traseul curent prin HTTP+WS
-    if (tab && !tab.closed) {
-      const lb = listboxes[index];
-      const preset = getTimerPreset(index);
-      safeSetItem(`climbingTime-${index}`, preset);
-      // send INIT_ROUTE via HTTP+WS
-      initRoute(
-        index,
-        lb.routeIndex,
+		    // 3. Trimite mesaj de (re)inițiere pentru traseul curent prin HTTP+WS
+		    if (tab && !tab.closed) {
+		      const lb = listboxes[index];
+		      // preset already persisted above
+		      // send INIT_ROUTE via HTTP+WS
+		      initRoute(
+		        index,
+		        lb.routeIndex,
         lb.holdsCount,
         lb.concurenti,
         preset,
@@ -1210,14 +1253,15 @@ const ControlPanel: FC = () => {
         };
       }),
     );
-    // resetează contorul local de holds
-    setHoldClicks((prev) => ({ ...prev, [index]: 0 }));
-    // reset timer button
-    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
-    clearRegisteredTime(index);
-    try {
-      safeRemoveItem(`ranking-${index}`);
-      safeRemoveItem(`rankingTimes-${index}`);
+	    // resetează contorul local de holds
+	    setHoldClicks((prev) => ({ ...prev, [index]: 0 }));
+	    // reset timer button
+	    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
+	    setTimerSecondsForBox(index, defaultTimerSec(index));
+	    clearRegisteredTime(index);
+	    try {
+	      safeRemoveItem(`ranking-${index}`);
+	      safeRemoveItem(`rankingTimes-${index}`);
     } catch (err) {
       debugError('Failed to clear cached rankings on reset', err);
     }
@@ -1251,7 +1295,7 @@ const ControlPanel: FC = () => {
         try {
           const config = getApiConfig();
           const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
-            headers: { ...getAuthHeader() },
+            credentials: 'include',
           });
           if (res.status === 401 || res.status === 403) {
             clearAuth();
@@ -1300,7 +1344,7 @@ const ControlPanel: FC = () => {
         try {
           const config = getApiConfig();
           const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
-            headers: { ...getAuthHeader() },
+            credentials: 'include',
           });
           if (res.status === 401 || res.status === 403) {
             clearAuth();
@@ -1350,7 +1394,7 @@ const ControlPanel: FC = () => {
         try {
           const config = getApiConfig();
           const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
-            headers: { ...getAuthHeader() },
+            credentials: 'include',
           });
           if (res.status === 401 || res.status === 403) {
             clearAuth();
@@ -1403,7 +1447,7 @@ const ControlPanel: FC = () => {
         try {
           const config = getApiConfig();
           const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
-            headers: { ...getAuthHeader() },
+            credentials: 'include',
           });
           if (res.status === 401 || res.status === 403) {
             clearAuth();
@@ -1456,7 +1500,7 @@ const ControlPanel: FC = () => {
         try {
           const config = getApiConfig();
           const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
-            headers: { ...getAuthHeader() },
+            credentials: 'include',
           });
           if (res.status === 401 || res.status === 403) {
             clearAuth();
@@ -1524,7 +1568,29 @@ const ControlPanel: FC = () => {
     }
   };
 
-  const handleScoreSubmit = async (score: number, boxIdx: number): Promise<void> => {
+  const markCompetitorInListboxes = (boxIdx: number, competitor: string): void => {
+    const target = normalizeCompetitorKey(competitor);
+    if (!target) return;
+    setListboxes((prev) =>
+      prev.map((lb, i) => {
+        if (i !== boxIdx || !lb?.concurenti?.length) return lb;
+        const updated = lb.concurenti.map((c) => {
+          if (c.marked) return c;
+          const candidate = normalizeCompetitorKey(c.nume);
+          if (candidate && candidate === target) {
+            return { ...c, marked: true };
+          }
+          return c;
+        });
+        return { ...lb, concurenti: updated };
+      }),
+    );
+  };
+
+  const handleScoreSubmit = async (
+    score: number,
+    boxIdx: number,
+  ): Promise<boolean | void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     const registeredTime = (() => {
       if (!getTimeCriterionEnabled(boxIdx)) return undefined;
@@ -1545,16 +1611,52 @@ const ControlPanel: FC = () => {
       }
       return undefined;
     })();
-    persistRankingEntry(boxIdx, activeCompetitor, score, registeredTime);
     try {
-      await submitScore(boxIdx, score, activeCompetitor, registeredTime);
-      // Reset UI state for this box
-      setHoldClicks((prev) => ({ ...prev, [boxIdx]: 0 }));
-      setUsedHalfHold((prev) => ({ ...prev, [boxIdx]: false }));
-      setTimerStates((prev) => ({ ...prev, [boxIdx]: 'idle' }));
-      setShowScoreModal(false);
-      setActiveBoxId(null);
-      clearRegisteredTime(boxIdx);
+      const result: any = await submitScore(boxIdx, score, activeCompetitor, registeredTime);
+      if (result?.status === 'ignored') {
+        showRankingStatus(
+          boxIdx,
+          `SUBMIT_SCORE ignored by backend (${result.reason || 'unknown'}). Resyncing...`,
+          'error',
+        );
+        try {
+          const config = getApiConfig();
+          const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+            credentials: 'include',
+          });
+          if (res.status === 401 || res.status === 403) {
+            clearAuth();
+            setAdminRole(null);
+            setShowAdminLogin(true);
+            return false;
+          }
+          if (res.ok) {
+            const st = await res.json();
+            if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+            if (typeof st?.boxVersion === 'number') safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+            if (typeof st?.holdCount === 'number') {
+              setHoldClicks((prev) => ({ ...prev, [boxIdx]: st.holdCount }));
+            }
+            if (typeof st?.currentClimber === 'string') {
+              setCurrentClimbers((prev) => ({ ...prev, [boxIdx]: st.currentClimber }));
+            }
+          }
+        } catch (err) {
+          debugError(`Failed to resync state after ignored SUBMIT_SCORE for box ${boxIdx}`, err);
+        }
+        return false;
+      }
+
+      persistRankingEntry(boxIdx, activeCompetitor, score, registeredTime);
+      markCompetitorInListboxes(boxIdx, activeCompetitor);
+	      // Reset UI state for this box
+	      setHoldClicks((prev) => ({ ...prev, [boxIdx]: 0 }));
+	      setUsedHalfHold((prev) => ({ ...prev, [boxIdx]: false }));
+	      setTimerStates((prev) => ({ ...prev, [boxIdx]: 'idle' }));
+	      setTimerSecondsForBox(boxIdx, defaultTimerSec(boxIdx));
+	      setShowScoreModal(false);
+	      setActiveBoxId(null);
+	      clearRegisteredTime(boxIdx);
     } finally {
       setLoadingBoxes((prev) => {
         const next = new Set(prev);
@@ -1687,6 +1789,67 @@ const ControlPanel: FC = () => {
     setShowSetPasswordDialog(true);
   };
 
+  const openRoutesetterDialog = (boxId: number | null): void => {
+    if (boxId == null || listboxes.length === 0) return;
+    const box = listboxes[boxId];
+    const routeIdx = box?.routeIndex || 1;
+    const routesCount = box?.routesCount || 1;
+    
+    // Load all existing routesetter names for all routes
+    const tempNames: Record<number, string> = {};
+    for (let i = 1; i <= routesCount; i++) {
+      const existing =
+        safeGetItem(`routesetterName-${boxId}-${i}`) ||
+        safeGetItem(`routesetterName-${boxId}`) ||
+        safeGetItem('routesetterName') ||
+        '';
+      if (existing) tempNames[i] = existing;
+    }
+    
+    setRoutesetterBoxId(boxId);
+    setRoutesetterRouteIndex(routeIdx);
+    setRoutesetterNamesTemp(tempNames);
+    setRoutesetterNameInput(tempNames[routeIdx] || '');
+    setRoutesetterDialogError(null);
+    setShowRoutesetterDialog(true);
+  };
+
+  const saveRoutesetter = (): void => {
+    if (routesetterBoxId == null) {
+      setRoutesetterDialogError('Select a category.');
+      return;
+    }
+    
+    // Save current input to temp state first
+    const currentName = routesetterNameInput.trim();
+    const allNames = { ...routesetterNamesTemp };
+    if (currentName) {
+      allNames[routesetterRouteIndex] = currentName;
+    }
+    
+    // Validate that at least one route has a name
+    const hasAnyName = Object.values(allNames).some(name => name && name.trim());
+    if (!hasAnyName) {
+      setRoutesetterDialogError('At least one routesetter name is required.');
+      return;
+    }
+    
+    // Save all names to localStorage
+    Object.entries(allNames).forEach(([routeIdx, name]) => {
+      if (name && name.trim()) {
+        safeSetItem(`routesetterName-${routesetterBoxId}-${routeIdx}`, name.trim());
+      }
+    });
+    
+    // Also save the last entered name as defaults
+    if (currentName) {
+      safeSetItem(`routesetterName-${routesetterBoxId}`, currentName);
+      safeSetItem('routesetterName', currentName);
+    }
+    
+    setShowRoutesetterDialog(false);
+  };
+
   const submitJudgePassword = async (boxIdx: number): Promise<void> => {
     if (showAdminLogin || adminRole !== 'admin') {
       setShowAdminLogin(true);
@@ -1804,12 +1967,17 @@ const ControlPanel: FC = () => {
     setShowBoxTimerDialog(true);
   };
 
-  const applyTimerPreset = (boxId: number, preset: string): void => {
-    setListboxes((prev) =>
-      prev.map((lb, idx) => (idx === boxId ? { ...lb, timerPreset: preset } : lb)),
-    );
-    safeSetItem(`climbingTime-${boxId}`, preset);
-  };
+	  const applyTimerPreset = (boxId: number, preset: string): void => {
+	    setListboxes((prev) =>
+	      prev.map((lb, idx) => (idx === boxId ? { ...lb, timerPreset: preset } : lb)),
+	    );
+	    safeSetItem(`climbingTime-${boxId}`, preset);
+	    // If timer is idle, update displayed/reset value immediately to match preset.
+	    const state = timerStatesRef.current[boxId] || 'idle';
+	    if (state !== 'running' && state !== 'paused') {
+	      setTimerSecondsForBox(boxId, presetToSeconds(preset));
+	    }
+	  };
 
   const saveBoxTimerDialog = async (): Promise<void> => {
     if (timerDialogBoxId == null) {
@@ -1914,7 +2082,7 @@ const ControlPanel: FC = () => {
   ];
 
   return (
-    <div className="p-6">
+    <div className={styles.container}>
       {showAdminLogin && (
         <LoginOverlay
           onSuccess={() => {
@@ -1923,28 +2091,30 @@ const ControlPanel: FC = () => {
           }}
         />
       )}
-      <div className="w-full">
-        <h1 className="text-3xl font-bold text-center mb-6">Control Panel</h1>
-        <section className="mb-6 rounded-xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-6 py-4">
-            <div>
-              <div className="text-xl font-semibold">Admin Panel</div>
-              <div className="text-sm text-slate-600">Admin Panel &gt; {adminViewLabel}</div>
-            </div>
-            <div className="flex items-center gap-2">
-              {adminRole === 'admin' ? (
-                <button
-                  className="px-3 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
-                  onClick={handleAdminLogout}
-                  type="button"
-                >
-                  Log out
-                </button>
-              ) : (
-                <span className="text-xs text-slate-500">Login required</span>
-              )}
-            </div>
+      <div className={styles.header}>
+        <h1 className={styles.title}>🎯 Control Panel</h1>
+        <p className={styles.subtitle}>Manage competitions in real-time</p>
+      </div>
+      <section className={styles.adminBar}>
+        <div className="flex items-center justify-between mb-md">
+          <div>
+            <h2 className="text-2xl font-semibold text-primary">Admin Panel</h2>
+            <p className="text-sm text-secondary">Admin Panel › {adminViewLabel}</p>
           </div>
+          <div className="flex items-center gap-md">
+            {adminRole === 'admin' ? (
+              <button
+                className="modern-btn modern-btn-ghost"
+                onClick={handleAdminLogout}
+                type="button"
+              >
+                Log out
+              </button>
+            ) : (
+              <span className="modern-badge modern-badge-neutral">Login required</span>
+            )}
+          </div>
+        </div>
 
           
 
@@ -1979,14 +2149,14 @@ const ControlPanel: FC = () => {
                         key={id}
                         className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition ${
                           isActive
-                            ? 'bg-slate-900 text-white'
-                            : 'text-slate-700 hover:bg-slate-100'
+                            ? 'bg-gradient-to-r from-cyan-500/20 to-blue-500/20 text-cyan-300 border border-cyan-500/30'
+                            : 'text-slate-300 hover:bg-white/5 border border-transparent'
                         }`}
                         onClick={() => setAdminActionsView(id)}
                         disabled={adminRole !== 'admin'}
                         type="button"
                       >
-                        <Icon className={isActive ? 'text-white' : 'text-slate-500'} />
+                        <Icon className={isActive ? 'text-cyan-400' : 'text-slate-400'} />
                         <span>{label}</span>
                       </button>
                     );
@@ -2003,13 +2173,13 @@ const ControlPanel: FC = () => {
                   {adminActionsView === 'actions' && (
                     <div className="space-y-4">
 
-                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                        <div className="border border-slate-200 rounded-lg p-4">
-                          <div className="text-sm font-semibold text-slate-700 mb-2">Scoring</div>
-                          <label className="text-sm">
-                            Box
+	                      <div className="grid grid-cols-[repeat(3,minmax(260px,1fr))] gap-3 overflow-x-auto">
+                        <div className={styles.adminCard}>
+                          <div className={styles.adminCardTitle}>Scoring</div>
+                          <label className={styles.modalField}>
+                            <span className={styles.modalLabel}>Select category</span>
                             <select
-                              className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                              className={styles.modalSelect}
                               value={scoringBoxId ?? ''}
                               onChange={(e) => {
                                 const value = e.target.value;
@@ -2020,7 +2190,7 @@ const ControlPanel: FC = () => {
                               {scoringEnabled ? (
                                 initiatedBoxIds.map((idx) => (
                                   <option key={idx} value={idx}>
-                                    {idx} — {sanitizeBoxName(listboxes[idx].categorie || `Box ${idx}`)}
+                                    {sanitizeBoxName(listboxes[idx].categorie || `Box ${idx}`)}
                                   </option>
                                 ))
                               ) : (
@@ -2029,13 +2199,13 @@ const ControlPanel: FC = () => {
                             </select>
                           </label>
                           {!scoringEnabled && (
-                            <div className="text-xs text-slate-500">
+                            <div className="text-xs" style={{ color: 'var(--text-tertiary)', marginTop: '8px' }}>
                               upload a category and initiate contest
                             </div>
                           )}
                           <div className="mt-3 flex flex-col gap-2">
                           <button
-                            className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="modern-btn modern-btn-ghost"
                             onClick={openModifyScoreFromAdmin}
                             disabled={!scoringBoxSelected || !scoringBoxHasMarked}
                             type="button"
@@ -2043,7 +2213,7 @@ const ControlPanel: FC = () => {
                             Modify score
                           </button>
                           <button
-                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="modern-btn modern-btn-ghost"
                             onClick={openCeremonyFromAdmin}
                             disabled={!scoringBoxSelected}
                             type="button"
@@ -2053,12 +2223,12 @@ const ControlPanel: FC = () => {
                           </div>
                         </div>
 
-                        <div className="border border-slate-200 rounded-lg p-4">
-                          <div className="text-sm font-semibold text-slate-700 mb-2">Judge access</div>
-                          <label className="text-sm">
-                            Box
+                        <div className={styles.adminCard}>
+                          <div className={styles.adminCardTitle}>Judge access</div>
+                          <label className={styles.modalField}>
+                            <span className={styles.modalLabel}>Select category</span>
                             <select
-                              className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                              className={styles.modalSelect}
                               value={judgeAccessBoxId ?? ''}
                               onChange={(e) => {
                                 const value = e.target.value;
@@ -2069,7 +2239,7 @@ const ControlPanel: FC = () => {
                               {judgeAccessEnabled ? (
                                 listboxes.map((b, idx) => (
                                   <option key={idx} value={idx}>
-                                    {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
+                                    {sanitizeBoxName(b.categorie || `Box ${idx}`)}
                                   </option>
                                 ))
                               ) : (
@@ -2078,13 +2248,13 @@ const ControlPanel: FC = () => {
                             </select>
                           </label>
                           {!judgeAccessEnabled && (
-                            <div className="text-xs text-slate-500">
+                            <div className="text-xs" style={{ color: 'var(--text-tertiary)', marginTop: '8px' }}>
                               upload a category and initiate contest
                             </div>
                           )}
                           <div className="mt-3 flex flex-col gap-2">
                           <button
-                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="modern-btn modern-btn-ghost"
                             onClick={openJudgeViewFromAdmin}
                             disabled={!judgeAccessSelected || !judgeAccessBox?.initiated}
                             type="button"
@@ -2092,7 +2262,7 @@ const ControlPanel: FC = () => {
                             Open judge view
                           </button>
                           <button
-                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="modern-btn modern-btn-ghost"
                             onClick={() => {
                               if (judgeAccessBoxId == null) return;
                               openQrDialog(judgeAccessBoxId);
@@ -2103,7 +2273,7 @@ const ControlPanel: FC = () => {
                             Generate QR
                           </button>
                           <button
-                            className="px-3 py-2 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="modern-btn modern-btn-ghost"
                             onClick={() => {
                               if (judgeAccessBoxId == null) return;
                               openSetJudgePasswordDialog(judgeAccessBoxId);
@@ -2116,25 +2286,55 @@ const ControlPanel: FC = () => {
                           </div>
                         </div>
 
-                        <div className="border border-slate-200 rounded-lg p-4">
-                          <div className="text-sm font-semibold text-slate-700 mb-2">Setup</div>
-                          <div className="flex flex-col gap-2">
+                        <div className={styles.adminCard}>
+                          <div className={styles.adminCardTitle}>Setup</div>
+                          <label className={styles.modalField}>
+                            <span className={styles.modalLabel}>Select category</span>
+                            <select
+                              className={styles.modalSelect}
+                              value={setupBoxId ?? (listboxes.length > 0 ? 0 : '')}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setSetupBoxId(value === '' ? null : Number(value));
+                              }}
+                              disabled={listboxes.length === 0}
+                            >
+                              {listboxes.length === 0 ? (
+                                <option value="">No boxes available</option>
+                              ) : (
+                                listboxes.map((b, idx) => (
+                                  <option key={idx} value={idx}>
+                                    {sanitizeBoxName(b.categorie || `Box ${idx}`)}
+                                  </option>
+                                ))
+                              )}
+                            </select>
+                          </label>
+                          <div className="flex flex-col gap-2 mt-3">
                           <button
-                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                            onClick={() => openBoxTimerDialog(null)}
-                            disabled={listboxes.length === 0}
+                            className="modern-btn modern-btn-ghost"
+                            onClick={() => openBoxTimerDialog(setupBoxId)}
+                            disabled={setupBoxId == null}
                             type="button"
                           >
                             Set timer
                           </button>
                           <button
-                            className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200"
+                            className="modern-btn modern-btn-ghost"
                             onClick={() => {
                               window.open(`${window.location.origin}/#/rankings`, '_blank');
                             }}
                             type="button"
                           >
                             Open public rankings
+                          </button>
+                          <button
+                            className="modern-btn modern-btn-ghost"
+                            onClick={() => openRoutesetterDialog(setupBoxId)}
+                            disabled={setupBoxId == null}
+                            type="button"
+                          >
+                            Set routesetter
                           </button>
                           </div>
                         </div>
@@ -2174,10 +2374,8 @@ const ControlPanel: FC = () => {
             </div>
           </div>
         </section>
-      </div>
 
-
-
+      {/* Modals */}
       <ModalModifyScore
         isOpen={showModifyModal && editList.length > 0}
         competitors={editList}
@@ -2197,106 +2395,106 @@ const ControlPanel: FC = () => {
         }}
       />
 
-      {showQrDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-lg font-semibold">Judge QR</div>
-                <div className="text-sm text-slate-600">manual authentication required</div>
+	      {showQrDialog && (
+	        <div className={styles.modalOverlay}>
+	          <div className={styles.modalCard}>
+	            <div className={styles.modalHeader}>
+	              <div>
+	                <div className={styles.modalTitle}>Judge QR</div>
+	                <div className={styles.modalSubtitle}>manual authentication required</div>
+	              </div>
+	              <button
+	                className="modern-btn modern-btn-sm modern-btn-ghost"
+	                onClick={() => setShowQrDialog(false)}
+	                type="button"
+	              >
+	                Cancel
+	              </button>
+	            </div>
+	            <div className={styles.modalContent}>
+	              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
+	                <QRCode value={adminQrUrl} size={180} />
+                <div style={{ 
+                  width: '100%', 
+                  padding: '12px', 
+                  background: 'rgba(0, 0, 0, 0.4)', 
+                  border: '1px solid var(--border-medium)', 
+                  borderRadius: 'var(--radius-md)', 
+                  fontSize: '12px', 
+                  color: 'var(--text-secondary)', 
+                  wordBreak: 'break-all'
+                }}>
+                  {adminQrUrl}
+                </div>
+                <button
+                  className="modern-btn modern-btn-ghost"
+                  onClick={handleCopyQrUrl}
+                  type="button"
+                >
+                  Copy URL
+                </button>
               </div>
-              <button
-                className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
-                onClick={() => setShowQrDialog(false)}
-                type="button"
-              >
-                Close
-              </button>
-            </div>
-            <div className="mt-4 flex flex-col items-center gap-3">
-              <QRCode value={adminQrUrl} size={180} />
-              <div className="w-full rounded border border-slate-200 bg-slate-50 p-2 text-xs break-all">
-                {adminQrUrl}
-              </div>
-              <button
-                className="px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200"
-                onClick={handleCopyQrUrl}
-                type="button"
-              >
-                Copy URL
-              </button>
             </div>
           </div>
         </div>
       )}
 
-      {showSetPasswordDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-lg font-semibold">Set judge password</div>
-                <div className="text-sm text-slate-600">
-                  Choose credentials for the judge login.
-                </div>
-              </div>
-              <button
-                className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
-                onClick={() => setShowSetPasswordDialog(false)}
-                type="button"
-              >
-                Close
-              </button>
-            </div>
-            <div className="mt-4 space-y-3">
-              <label className="text-sm">
-                Username
-                <input
-                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+	      {showSetPasswordDialog && (
+	        <div className={styles.modalOverlay}>
+	          <div className={styles.modalCard}>
+	            <div className={styles.modalHeader}>
+	              <div>
+	                <div className={styles.modalTitle}>Set judge password</div>
+	                <div className={styles.modalSubtitle}>
+	                  Choose credentials for the judge login.
+	                </div>
+	              </div>
+	            </div>
+	            <div className={styles.modalContent}>
+	              <div className={styles.modalField}>
+	                <label className={styles.modalLabel}>Username</label>
+	                <input
+                  className={styles.modalInput}
                   value={judgeUsername}
                   onChange={(e) => setJudgeUsername(e.target.value)}
                   type="text"
                 />
-              </label>
-              <label className="text-sm">
-                Password
+              </div>
+              <div className={styles.modalField}>
+                <label className={styles.modalLabel}>Password</label>
                 <input
-                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                  className={styles.modalInput}
                   value={judgePassword}
                   onChange={(e) => setJudgePassword(e.target.value)}
                   type="password"
                 />
-              </label>
-              <label className="text-sm">
-                Confirm password
+              </div>
+              <div className={styles.modalField}>
+                <label className={styles.modalLabel}>Confirm password</label>
                 <input
-                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                  className={styles.modalInput}
                   value={judgePasswordConfirm}
                   onChange={(e) => setJudgePasswordConfirm(e.target.value)}
                   type="password"
                 />
-              </label>
+              </div>
               {judgePasswordStatus && (
                 <div
-                  className={`text-sm rounded px-3 py-2 ${
-                    judgePasswordStatus.type === 'success'
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-red-100 text-red-700'
-                  }`}
+                  className={judgePasswordStatus.type === 'success' ? styles.modalAlertSuccess : styles.modalAlertError}
                 >
                   {judgePasswordStatus.message}
                 </div>
               )}
-              <div className="flex justify-end gap-2">
+              <div className={styles.modalActions}>
                 <button
-                  className="px-3 py-2 rounded border border-slate-200 hover:bg-slate-100"
+                  className="modern-btn modern-btn-ghost"
                   onClick={() => setShowSetPasswordDialog(false)}
                   type="button"
                 >
                   Cancel
                 </button>
                 <button
-                  className="px-3 py-2 bg-amber-600 text-white rounded hover:bg-amber-700"
+                  className="modern-btn modern-btn-warning"
                   onClick={() => {
                     if (judgePasswordBoxId == null) return;
                     void submitJudgePassword(judgePasswordBoxId);
@@ -2311,67 +2509,122 @@ const ControlPanel: FC = () => {
         </div>
       )}
 
-      {showBoxTimerDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-lg font-semibold">Set timer</div>
-                <div className="text-sm text-slate-600">
-                  Configure timer preset and top-3 time display per box.
-                </div>
-              </div>
-              <button
-                className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-100"
-                onClick={() => setShowBoxTimerDialog(false)}
-                type="button"
-              >
-                Close
-              </button>
-            </div>
-            <div className="mt-4 space-y-3">
-              <label className="text-sm">
-                Box
-                <select
-                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
-                  value={timerDialogBoxId ?? ''}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    const nextId = value === '' ? null : Number(value);
-                    setTimerDialogBoxId(nextId);
-                    setTimerDialogError(null);
-                    if (nextId != null) {
-                      setTimerDialogValue(getTimerPreset(nextId));
-                      setTimerDialogCriterion(getTimeCriterionEnabled(nextId));
-                    } else {
-                      setTimerDialogCriterion(false);
-                    }
-                  }}
-                  disabled={listboxes.length === 0}
-                >
-                  {listboxes.length === 0 ? (
-                    <option value="">No boxes available</option>
-                  ) : (
-                    listboxes.map((b, idx) => (
-                      <option key={idx} value={idx}>
-                        {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
+	      {showRoutesetterDialog && (
+	        <div className={styles.modalOverlay}>
+	          <div className={styles.modalCard}>
+	            <div className={styles.modalHeader}>
+	              <div>
+	                <div className={styles.modalTitle}>Set routesetter</div>
+	                <div className={styles.modalSubtitle}>
+	                  {routesetterBoxId != null && listboxes[routesetterBoxId] ? (
+	                    `Category: ${sanitizeBoxName(listboxes[routesetterBoxId].categorie || `Box ${routesetterBoxId}`)}`
+	                  ) : (
+	                    'Set the routesetter name for the selected category.'
+	                  )}
+	                </div>
+	              </div>
+	            </div>
+	            <div className={styles.modalContent}>
+              {routesetterBoxId != null && listboxes[routesetterBoxId]?.routesCount > 1 && (
+                <div className={styles.modalField}>
+                  <label className={styles.modalLabel}>Route</label>
+                  <select
+                    className={styles.modalSelect}
+                    value={routesetterRouteIndex}
+                    onChange={(e) => {
+                      // Save current input to temp state before switching
+                      const currentName = routesetterNameInput.trim();
+                      if (currentName) {
+                        setRoutesetterNamesTemp(prev => ({
+                          ...prev,
+                          [routesetterRouteIndex]: currentName
+                        }));
+                      }
+                      
+                      // Switch to new route
+                      const newRoute = Number(e.target.value);
+                      setRoutesetterRouteIndex(newRoute);
+                      
+                      // Load name for new route from temp state
+                      const newName = routesetterNamesTemp[newRoute] || '';
+                      setRoutesetterNameInput(newName);
+                    }}
+                  >
+                    {Array.from({ length: listboxes[routesetterBoxId].routesCount }).map((_, i) => (
+                      <option key={i + 1} value={i + 1}>
+                        Route {i + 1}
                       </option>
-                    ))
-                  )}
-                </select>
-              </label>
-              <label className="text-sm">
-                Timer preset (MM:SS)
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className={styles.modalField}>
+                <label className={styles.modalLabel}>Routesetter name</label>
                 <input
-                  className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
+                  className={styles.modalInput}
+                  value={routesetterNameInput}
+                  onChange={(e) => setRoutesetterNameInput(e.target.value)}
+                  placeholder="e.g. Alex Popescu"
+                  type="text"
+                />
+              </div>
+
+              {routesetterDialogError && (
+                <div className={styles.modalAlertError}>
+                  {routesetterDialogError}
+                </div>
+              )}
+
+              <div className={styles.modalActions}>
+                <button
+                  className="modern-btn modern-btn-ghost"
+                  onClick={() => setShowRoutesetterDialog(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="modern-btn modern-btn-primary"
+                  onClick={saveRoutesetter}
+                  type="button"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+	      {showBoxTimerDialog && (
+	        <div className={styles.modalOverlay}>
+	          <div className={styles.modalCard}>
+	            <div className={styles.modalHeader}>
+	              <div>
+	                <div className={styles.modalTitle}>Set timer</div>
+	                <div className={styles.modalSubtitle}>
+	                  {timerDialogBoxId != null && listboxes[timerDialogBoxId] ? (
+	                    `Category: ${sanitizeBoxName(listboxes[timerDialogBoxId].categorie || `Box ${timerDialogBoxId}`)}`
+	                  ) : (
+	                    'Configure timer preset and top-3 time display.'
+	                  )}
+	                </div>
+	              </div>
+	            </div>
+	            <div className={styles.modalContent}>
+              <div className={styles.modalField}>
+                <label className={styles.modalLabel}>Timer preset (MM:SS)</label>
+                <input
+                  className={styles.modalInput}
                   value={timerDialogValue}
                   onChange={(e) => setTimerDialogValue(e.target.value)}
                   placeholder="MM:SS"
                   type="text"
                 />
-              </label>
+              </div>
               <button
-                className="w-full px-3 py-2 bg-slate-100 text-slate-900 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="modern-btn modern-btn-ghost"
+                style={{ width: '100%' }}
                 onClick={() => setTimerDialogCriterion((prev) => !prev)}
                 disabled={timerDialogBoxId == null}
                 type="button"
@@ -2379,20 +2632,20 @@ const ControlPanel: FC = () => {
                 Top-3 time display: {timerDialogCriterion ? 'On' : 'Off'}
               </button>
               {timerDialogError && (
-                <div className="text-sm rounded px-3 py-2 bg-red-100 text-red-700">
+                <div className={styles.modalAlertError}>
                   {timerDialogError}
                 </div>
               )}
-              <div className="flex justify-end gap-2">
+              <div className={styles.modalActions}>
                 <button
-                  className="px-3 py-2 rounded border border-slate-200 hover:bg-slate-100"
+                  className="modern-btn modern-btn-ghost"
                   onClick={() => setShowBoxTimerDialog(false)}
                   type="button"
                 >
                   Cancel
                 </button>
                 <button
-                  className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="modern-btn modern-btn-primary"
                   onClick={() => void saveBoxTimerDialog()}
                   disabled={timerDialogBoxId == null}
                   type="button"
@@ -2405,118 +2658,138 @@ const ControlPanel: FC = () => {
         </div>
       )}
 
-      <div className="mt-6 flex flex-nowrap gap-4 overflow-x-auto">
-        {listboxes.map((lb, idx) => {
-          const timerState = timerStates[idx] || 'idle';
-          const isRunning = timerState === 'running';
-          const isPaused = timerState === 'paused';
-          return (
-            <details
-              key={idx}
-              open
-              className="relative border border-gray-300 rounded bg-white shadow w-64"
+      <div className={styles.boxesGrid}>
+	        {listboxes.map((lb, idx) => {
+	          const timerState = timerStates[idx] || 'idle';
+	          const isRunning = timerState === 'running';
+	          const isPaused = timerState === 'paused';
+	          const statusClass = isRunning ? 'running' : isPaused ? 'paused' : 'idle';
+	          const activeKey = normalizeCompetitorKey(currentClimbers[idx] || '');
+	          const presetSec = defaultTimerSec(idx);
+	          const remainingSec = readCurrentTimerSec(idx);
+	          const hasActiveRemaining =
+	            !!lb.initiated &&
+	            typeof remainingSec === 'number' &&
+	            Number.isFinite(remainingSec) &&
+	            remainingSec !== presetSec;
+	          const displaySec =
+	            isRunning || isPaused || hasActiveRemaining ? (remainingSec ?? presetSec) : presetSec;
+	          return (
+	            <div
+	              key={idx}
+	              className={`${styles.boxCard} ${loadingBoxes.has(idx) ? styles.loading : ''} fade-in-up`}
+	              style={{ animationDelay: `${idx * 0.05}s` }}
             >
-              <summary className="flex justify-between items-center text-lg font-semibold cursor-pointer p-2 bg-gray-100">
-                <span>
-                  {sanitizeBoxName(lb.categorie)} – Route {lb.routeIndex}/{lb.routesCount}
-                </span>
-                <div className="px-2 py-1 text-right text-sm text-gray-600">
-                  {typeof controlTimers[idx] === 'number'
-                    ? formatTime(controlTimers[idx])
-                    : formatTime(defaultTimerSec(idx))}
+              <div className={styles.boxHeader}>
+                <div className={styles.boxTitle}>
+                  <span>{sanitizeBoxName(lb.categorie)}</span>
+                  <span className={`${styles.statusBadge} ${styles[statusClass]}`}>
+                    <span className={styles.statusDot}></span>
+                    {statusClass.toUpperCase()}
+                  </span>
                 </div>
-              </summary>
+	                <div className={styles.boxRouteInfo}>
+	                  <span>Route {lb.routeIndex}/{lb.routesCount}</span>
+	                  <span className={styles.timerDisplay}>
+	                    {formatTime(displaySec)}
+	                  </span>
+	                </div>
+	              </div>
 
-              <ul className="list-disc pl-5 p-2 bg-blue-900 text-white rounded">
-                {lb.concurenti.map((c, i) => {
-                  const isClimbing = currentClimbers[idx] === c.nume;
-                  return (
-                    <li
-                      key={i}
-                      className={`${
-                        c.marked ? 'marked-red ' : ''
-                      }${isClimbing ? 'bg-yellow-500 text-white animate-pulse ' : ''}py-1 px-2 rounded`}
+	              <div className={styles.competitorsList}>
+	                {lb.concurenti.map((c, i) => {
+	                  const isClimbing =
+	                    !!activeKey && normalizeCompetitorKey(c.nume) === activeKey;
+	                  return (
+	                    <div
+	                      key={i}
+	                      className={`${styles.competitorItem} ${
+                        c.marked ? styles.marked : ''
+                      } ${isClimbing ? styles.active : ''}`}
                     >
-                      {sanitizeCompetitorName(c.nume)} – {sanitizeBoxName(c.club || '')}
-                    </li>
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">{sanitizeCompetitorName(c.nume)}</span>
+                        {c.club && <span className="text-xs text-tertiary">{sanitizeBoxName(c.club)}</span>}
+                      </div>
+                    </div>
                   );
                 })}
-              </ul>
+              </div>
 
-              <div className="mt-2 flex flex-col gap-2">
+              <div className={styles.boxActions}>
                 {!lb.initiated && (
                   <button
-                    className={`px-3 py-1 bg-green-600 text-white rounded disabled:opacity-50 ${loadingBoxes.has(idx) ? 'btn-loading' : ''}`}
+                    className={`modern-btn modern-btn-success ${loadingBoxes.has(idx) ? 'loading' : ''}`}
                     onClick={() => handleInitiate(idx)}
                     disabled={lb.initiated || loadingBoxes.has(idx)}
                   >
                     {loadingBoxes.has(idx) ? (
                       <>
-                        <span className="spinner-border spinner-border-sm inline-block mr-2" />
+                        <span className="spinner" style={{ width: '16px', height: '16px', marginRight: '8px' }} />
                         Initiating...
                       </>
                     ) : (
-                      'Initiate Contest'
+                      '🚀 Initiate Contest'
                     )}
                   </button>
                 )}
 
                 {!isRunning && !isPaused && (
                   <button
-                    className={`px-3 py-1 bg-blue-600 text-white rounded disabled:opacity-50 ${loadingBoxes.has(idx) ? 'btn-loading' : ''}`}
+                    className={`modern-btn modern-btn-primary btn-press-effect ${loadingBoxes.has(idx) ? 'loading' : ''}`}
                     onClick={() => handleClickStart(idx)}
                     disabled={!lb.initiated || loadingBoxes.has(idx)}
                   >
                     {loadingBoxes.has(idx) ? (
                       <>
-                        <span className="spinner-border spinner-border-sm inline-block mr-2" />
+                        <span className="spinner" style={{ width: '16px', height: '16px', marginRight: '8px' }} />
                         Starting...
                       </>
                     ) : (
-                      'Start Time'
+                      '▶️ Start Timer'
                     )}
                   </button>
                 )}
 
                 {isRunning && (
                   <button
-                    className={`px-3 py-1 bg-red-600 text-white rounded disabled:opacity-50 ${loadingBoxes.has(idx) ? 'btn-loading' : ''}`}
+                    className={`modern-btn modern-btn-danger btn-press-effect ${loadingBoxes.has(idx) ? 'loading' : ''}`}
                     onClick={() => handleClickStop(idx)}
                     disabled={!lb.initiated || loadingBoxes.has(idx)}
                   >
                     {loadingBoxes.has(idx) ? (
                       <>
-                        <span className="spinner-border spinner-border-sm inline-block mr-2" />
+                        <span className="spinner" style={{ width: '16px', height: '16px', marginRight: '8px' }} />
                         Stopping...
                       </>
                     ) : (
-                      'Stop Time'
+                      '⏸️ Stop Timer'
                     )}
                   </button>
                 )}
 
                 {isPaused && (
-                  <div className="flex gap-2">
+                  <div className="flex gap-sm">
                     <button
-                      className={`px-3 py-1 bg-blue-600 text-white rounded disabled:opacity-50 ${loadingBoxes.has(idx) ? 'btn-loading' : ''}`}
+                      className={`modern-btn modern-btn-primary btn-press-effect ${loadingBoxes.has(idx) ? 'loading' : ''}`}
                       onClick={() => handleClickResume(idx)}
                       disabled={!lb.initiated || loadingBoxes.has(idx)}
                     >
                       {loadingBoxes.has(idx) ? (
                         <>
-                          <span className="spinner-border spinner-border-sm inline-block mr-2" />
+                          <span className="spinner" style={{ width: '16px', height: '16px', marginRight: '8px' }} />
                           Resuming...
                         </>
                       ) : (
-                        'Resume Time'
+                        '▶️ Resume Timer'
                       )}
                     </button>
                   </div>
                 )}
-                <div className="flex flex-col items-center gap-1">
-                  <div className="flex gap-1">
+                <div className={styles.progressControls}>
+                  <div className="flex gap-sm flex-1">
                     <button
-                      className="px-12 py-3 bg-purple-600 text-white rounded hover:bg-purple-700 active:scale-95 transition flex flex-col items-center disabled:opacity-50"
+                      className="modern-btn modern-btn-primary flex-1 btn-press-effect"
                       onClick={() => handleClickHold(idx)}
                       disabled={
                         !lb.initiated ||
@@ -2532,15 +2805,16 @@ const ControlPanel: FC = () => {
                       }
                     >
                       <div className="flex flex-col items-center">
-                        <span className="text-xs font-medium">{currentClimbers[idx] || ''}</span>
-                        <span>+1 Hold</span>
-                        <span className="text-sm">
-                          Score {holdClicks[idx] || 0} → {lb.holdsCount}
+                        <span className="text-xs font-medium text-accent">{currentClimbers[idx] || ''}</span>
+                        <span className="text-lg font-bold">+1 Hold</span>
+                        <span className="text-xs text-secondary">
+                          {holdClicks[idx] || 0} → {lb.holdsCount}
                         </span>
                       </div>
                     </button>
                     <button
-                      className="px-4 py-3 bg-purple-600 text-white rounded hover:bg-purple-700 active:scale-95 transition disabled:opacity-50"
+                      className="modern-btn modern-btn-secondary btn-press-effect"
+                      style={{ minWidth: '60px' }}
                       onClick={() => handleHalfHoldClick(idx)}
                       disabled={
                         !lb.initiated ||
@@ -2556,20 +2830,20 @@ const ControlPanel: FC = () => {
                           : 'Add 0.1 hold'
                       }
                     >
-                      + .1
+                      +0.1
                     </button>
                   </div>
                 </div>
 
                 <button
-                  className="px-3 py-1 bg-yellow-500 text-white rounded disabled:opacity-50"
+                  className="modern-btn modern-btn-warning btn-press-effect"
                   onClick={() => {
                     setActiveBoxId(idx);
                     requestActiveCompetitor(idx);
                   }}
                   disabled={!lb.initiated || !currentClimbers[idx]}
                 >
-                  Insert Score
+                  📊 Insert Score
                 </button>
 
                 <Suspense fallback={null}>
@@ -2585,41 +2859,39 @@ const ControlPanel: FC = () => {
                 </Suspense>
 
                 <button
-                  className="px-3 py-1 bg-green-600 text-white rounded disabled:opacity-50"
+                  className="modern-btn modern-btn-success btn-press-effect"
                   onClick={() => handleNextRoute(idx)}
                   disabled={!lb.concurenti.every((c) => c.marked)}
                 >
-                  Next Route
+                  ➡️ Next Route
                 </button>
 
-                <div className="flex gap-2">
+                <div className="flex gap-sm">
                   <button
-                    className="px-3 py-1 bg-yellow-500 text-white rounded hover:bg-yellow-600"
+                    className="modern-btn modern-btn-warning hover-lift"
                     onClick={() => handleReset(idx)}
                   >
-                    Reset Listbox
+                    🔄 Reset
                   </button>
                   <button
-                    className="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600"
+                    className="modern-btn modern-btn-danger hover-lift"
                     onClick={() => handleDelete(idx)}
                   >
-                    Delete Listbox
+                    🗑️ Delete
                   </button>
                 </div>
 
                 {rankingStatus[idx]?.message && (
                   <div
-                    className={`text-sm mt-1 px-2 py-1 rounded ${
-                      rankingStatus[idx].type === 'error'
-                        ? 'bg-red-100 text-red-700'
-                        : 'bg-green-100 text-green-700'
+                    className={`${styles.messageBox} ${
+                      rankingStatus[idx].type === 'error' ? styles.error : styles.success
                     }`}
                   >
-                    {rankingStatus[idx].message}
+                    {rankingStatus[idx].type === 'error' ? '⚠️' : 'ℹ️'} {rankingStatus[idx].message}
                   </div>
                 )}
               </div>
-            </details>
+            </div>
           );
         })}
       </div>

@@ -1,5 +1,6 @@
 import React, { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
+import { RankingsPageSkeleton } from './Skeleton';
 
 type PublicBox = {
   boxId: number;
@@ -172,10 +173,44 @@ const buildRankingRows = (box: PublicBox): RankingRow[] => {
 const RankingsPage: FC = () => {
   const [boxes, setBoxes] = useState<Record<number, PublicBox>>({});
   const [selectedBoxId, setSelectedBoxId] = useState<number | null>(null);
+  const [isWsConnected, setIsWsConnected] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [isMobile, setIsMobile] = useState<boolean>(() => {
+    try {
+      return window.matchMedia?.('(max-width: 768px)')?.matches ?? false;
+    } catch {
+      return false;
+    }
+  });
+  const [pageIndex, setPageIndex] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
   const pollingRef = useRef<number | null>(null);
   const closedRef = useRef(false);
+
+  useEffect(() => {
+    let mql: MediaQueryList | null = null;
+    try {
+      mql = window.matchMedia('(max-width: 768px)');
+    } catch {
+      mql = null;
+    }
+    if (!mql) return;
+
+    const onChange = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    setIsMobile(mql.matches);
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', onChange);
+      return () => mql?.removeEventListener('change', onChange);
+    }
+    // Safari < 14
+    // eslint-disable-next-line deprecation/deprecation
+    mql.addListener(onChange);
+    return () => {
+      // eslint-disable-next-line deprecation/deprecation
+      mql?.removeListener(onChange);
+    };
+  }, []);
 
   const applySnapshot = useCallback((payloadBoxes: PublicBox[]) => {
     const next: Record<number, PublicBox> = {};
@@ -184,6 +219,7 @@ const RankingsPage: FC = () => {
       next[box.boxId] = normalizeBox(box);
     });
     setBoxes(next);
+    setIsInitialLoading(false);
   }, []);
 
   const applyBoxUpdate = useCallback((box: PublicBox) => {
@@ -232,6 +268,7 @@ const RankingsPage: FC = () => {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      setIsWsConnected(true);
       stopPolling();
       try {
         ws.send(JSON.stringify({ type: 'REQUEST_STATE' }));
@@ -265,10 +302,12 @@ const RankingsPage: FC = () => {
     };
 
     ws.onerror = () => {
+      setIsWsConnected(false);
       startPolling();
     };
 
     ws.onclose = () => {
+      setIsWsConnected(false);
       startPolling();
       if (!closedRef.current) {
         reconnectRef.current = window.setTimeout(connectWs, 2000);
@@ -328,120 +367,120 @@ const RankingsPage: FC = () => {
     Array.isArray(selectedBox?.holdsCounts) ? selectedBox?.holdsCounts?.length : 0,
   );
 
+  const rowsPerPage = useMemo(() => {
+    if (isMobile) return Math.max(1, rankingRows.length);
+    // tuned for 1080p readability with large type
+    return window.innerHeight >= 950 ? 12 : 10;
+  }, [isMobile, rankingRows.length]);
+
+  const pageCount = useMemo(() => {
+    if (isMobile) return 1;
+    return Math.max(1, Math.ceil(rankingRows.length / rowsPerPage));
+  }, [isMobile, rankingRows.length, rowsPerPage]);
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [selectedBoxId, rowsPerPage]);
+
+  useEffect(() => {
+    setPageIndex((prev) => Math.min(prev, Math.max(0, pageCount - 1)));
+  }, [pageCount]);
+
+  useEffect(() => {
+    if (isMobile) return;
+    if (pageCount <= 1) return;
+
+    const id = window.setInterval(() => {
+      setPageIndex((prev) => (prev + 1) % pageCount);
+    }, 12000);
+
+    return () => window.clearInterval(id);
+  }, [isMobile, pageCount]);
+
+  const visibleRows = useMemo(() => {
+    if (isMobile) return rankingRows;
+    const start = pageIndex * rowsPerPage;
+    const end = start + rowsPerPage;
+    return rankingRows.slice(start, end);
+  }, [isMobile, pageIndex, rankingRows, rowsPerPage]);
+
+  const pageStartIndex = isMobile ? 0 : pageIndex * rowsPerPage;
+
+  const InfoCard: FC<{ label: string; children: React.ReactNode; right?: React.ReactNode }> = ({
+    label,
+    children,
+    right,
+  }) => (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/40 px-4 py-3 shadow-[0_0_0_1px_rgba(15,23,42,0.4)]">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[11px] uppercase tracking-wider text-slate-400">{label}</div>
+        {right}
+      </div>
+      <div className="mt-1 text-base text-slate-50">{children}</div>
+    </div>
+  );
+
+  const MiniCard: FC<{ label: string; value: React.ReactNode; right?: React.ReactNode }> = ({
+    label,
+    value,
+    right,
+  }) => (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-3 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[10px] uppercase tracking-wider text-slate-400">{label}</div>
+        {right}
+      </div>
+      <div className="mt-1 text-sm font-semibold text-slate-50">{value}</div>
+    </div>
+  );
+
+  // Show skeleton during initial load
+  if (isInitialLoading) {
+    return <RankingsPageSkeleton />;
+  }
+
   return (
-    <div className="min-h-screen bg-gray-50 p-4">
-      <div className="max-w-6xl mx-auto space-y-4">
-        <header className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-          <div className="text-2xl font-semibold">Rankings</div>
-          <div className="text-sm text-slate-600">Live standings for initiated categories.</div>
+    <div className="min-h-screen overflow-y-auto bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900 text-slate-50 md:h-screen md:overflow-hidden">
+      <div className="mx-auto flex h-full max-w-[1400px] flex-col gap-3 px-3 py-3 md:gap-4 md:px-4 md:py-4">
+        <header className="flex flex-col gap-2 rounded-2xl border border-slate-800 bg-slate-900/40 px-4 py-3 backdrop-blur md:flex-row md:items-center md:justify-between md:gap-4">
+          <div className="flex items-end justify-between gap-3 md:block">
+            <div className="text-3xl font-semibold tracking-tight md:text-4xl">Rankings</div>
+            <div className="text-sm text-slate-400">Public live scoreboard</div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium ${
+                isWsConnected
+                  ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-200'
+                  : 'border-amber-400/30 bg-amber-500/10 text-amber-200'
+              }`}
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  isWsConnected ? 'bg-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.7)]' : 'bg-amber-300'
+                }`}
+              />
+              {isWsConnected ? 'Live (WS)' : 'Polling'}
+            </div>
+          </div>
         </header>
 
-        {selectedBox ? (
-          <section className="bg-white rounded-lg shadow-sm border border-slate-200 p-4 space-y-4">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <div className="text-lg font-semibold">
-                  {sanitizeBoxName(selectedBox.categorie || `Box ${selectedBox.boxId}`)}
-                </div>
-                <div className="text-xs text-slate-500">
-                  Route {selectedBox.routeIndex}/{selectedBox.routesCount || totalRoutes} •
-                  Preparing for climbing: {sanitizeCompetitorName(selectedBox.preparingClimber || '—')}
-                </div>
-              </div>
-              <div className="text-sm text-slate-600">
-                Timer: <span className="font-mono">{formatSeconds(selectedBox.remaining)}</span> (
-                {selectedBox.timerState || 'idle'})
-              </div>
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/35 px-3 py-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Initiated categories
             </div>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">Current climber</div>
-                <div className="text-xl font-semibold">
-                  {selectedBox.currentClimber || '—'}
-                </div>
-              </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">Time display</div>
-                <div className="text-sm text-slate-700">
-                  {selectedBox.timeCriterionEnabled ? 'Shown for top 3' : 'Hidden'}
-                </div>
-              </div>
+            <div className="text-xs text-slate-500">
+              {initiatedBoxes.length} active
             </div>
-
-            <div className="overflow-x-auto">
-              <div
-                className="grid gap-2 divide-x divide-gray-200 font-semibold border-b border-gray-200 pb-2 mb-2"
-                style={{ gridTemplateColumns: `1fr repeat(${totalRoutes}, 1fr) 90px` }}
-              >
-                <span className="px-2">Ranking</span>
-                {Array.from({ length: totalRoutes }).map((_, i) => (
-                  <span key={i} className="px-2 text-right">
-                    Score(T{i + 1})
-                  </span>
-                ))}
-                <span className="px-2 text-right text-red-600">Total</span>
-              </div>
-              <div className="max-h-[65vh] overflow-y-auto">
-                {rankingRows.length === 0 ? (
-                  <div className="text-sm text-slate-500 px-2 py-3">No scores yet.</div>
-                ) : (
-                  rankingRows.map((row, rowIndex) => {
-                    const showTime = !!selectedBox.timeCriterionEnabled && rowIndex < 3;
-                    return (
-                      <div
-                        key={row.nume}
-                        className="grid gap-2 divide-x divide-gray-100 py-2 text-sm"
-                        style={{ gridTemplateColumns: `1fr repeat(${totalRoutes}, 1fr) 90px` }}
-                      >
-                        <span className="px-2 font-medium">
-                          {row.rank}. {sanitizeCompetitorName(row.nume)}
-                        </span>
-                        {Array.from({ length: totalRoutes }).map((_, i) => {
-                          const scoreVal = row.raw[i];
-                          const timeVal = row.rawTimes[i];
-                          const maxHolds = Array.isArray(selectedBox.holdsCounts)
-                            ? selectedBox.holdsCounts?.[i]
-                            : undefined;
-                          const isScoreNumber =
-                            typeof scoreVal === 'number' && Number.isFinite(scoreVal);
-                          const isTop =
-                            isScoreNumber &&
-                            typeof maxHolds === 'number' &&
-                            scoreVal === Number(maxHolds);
-                          return (
-                            <span key={i} className="px-2 text-right flex flex-col items-end leading-tight">
-                              {isScoreNumber ? (isTop ? 'Top' : scoreVal.toFixed(1)) : '—'}
-                              {showTime && typeof timeVal === 'number' && (
-                                <span className="text-xs text-slate-500">
-                                  {formatSeconds(timeVal)}
-                                </span>
-                              )}
-                            </span>
-                          );
-                        })}
-                        <span className="px-2 text-right font-mono text-red-600">
-                          {row.total.toFixed(3)}
-                        </span>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          </section>
-        ) : (
-          <section className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-            <div className="text-sm text-slate-500">No initiated categories yet.</div>
-          </section>
-        )}
-
-        <section className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-          <div className="text-sm font-semibold text-slate-700 mb-3">Initiated categories</div>
+          </div>
           {initiatedBoxes.length === 0 ? (
-            <div className="text-sm text-slate-500">No initiated categories yet.</div>
+            <div className="mt-2 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-sm text-slate-300">
+              No initiated categories yet.
+            </div>
           ) : (
-            <div className="flex flex-wrap gap-2">
+            <div className="mt-2 flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {initiatedBoxes.map((box) => {
                 const active = selectedBoxId === box.boxId;
                 return (
@@ -449,10 +488,10 @@ const RankingsPage: FC = () => {
                     key={box.boxId}
                     type="button"
                     onClick={() => setSelectedBoxId(box.boxId)}
-                    className={`px-3 py-2 rounded-lg border text-sm transition ${
+                    className={`whitespace-nowrap rounded-full border px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
                       active
-                        ? 'bg-slate-900 text-white border-slate-900'
-                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                        ? 'border-cyan-400/40 bg-cyan-500/15 text-cyan-100 shadow-[0_0_24px_rgba(34,211,238,0.12)]'
+                        : 'border-slate-800 bg-slate-950/20 text-slate-200 hover:bg-slate-900/50'
                     }`}
                   >
                     {sanitizeBoxName(box.categorie || `Box ${box.boxId}`)}
@@ -462,6 +501,194 @@ const RankingsPage: FC = () => {
             </div>
           )}
         </section>
+
+        {selectedBox ? (
+          <main className="flex min-h-0 flex-1 flex-col gap-3 md:grid md:grid-cols-[360px_1fr] md:gap-4">
+            <aside className="flex flex-col gap-3 md:min-h-0">
+              <div className="grid grid-cols-3 gap-2">
+                <MiniCard
+                  label="Category"
+                  right={
+                    <span className="text-[10px] text-slate-500 font-mono">#{selectedBox.boxId}</span>
+                  }
+                  value={
+                    <span
+                      className="block truncate"
+                      title={sanitizeBoxName(selectedBox.categorie || `Box ${selectedBox.boxId}`)}
+                    >
+                      {sanitizeBoxName(selectedBox.categorie || `Box ${selectedBox.boxId}`)}
+                    </span>
+                  }
+                />
+                <MiniCard
+                  label="Current"
+                  value={
+                    <span
+                      className="block truncate"
+                      title={sanitizeCompetitorName(selectedBox.currentClimber || '—')}
+                    >
+                      {sanitizeCompetitorName(selectedBox.currentClimber || '—')}
+                    </span>
+                  }
+                />
+                <MiniCard
+                  label="Route"
+                  right={
+                    <span className="text-[10px] text-slate-500">
+                      {selectedBox.timeCriterionEnabled ? 'Time ON' : 'Time OFF'}
+                    </span>
+                  }
+                  value={
+                    <span className="font-mono text-lg tracking-tight md:text-2xl">
+                      {selectedBox.routeIndex}
+                      <span className="text-slate-500">/</span>
+                      {selectedBox.routesCount || totalRoutes}
+                    </span>
+                  }
+                />
+              </div>
+            </aside>
+
+            <section className="min-h-0 rounded-2xl border border-slate-800 bg-slate-900/35 p-3 md:p-4">
+              <div className="mb-3 flex items-end justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-100">Standings</div>
+                  <div className="text-xs text-slate-400">
+                    {rankingRows.length === 0 ? 'No scores yet' : `${rankingRows.length} competitors`}
+                  </div>
+                </div>
+                {!isMobile && pageCount > 1 && (
+                  <div className="text-xs text-slate-400">
+                    Page <span className="font-mono">{pageIndex + 1}</span>
+                    <span className="text-slate-600">/</span>
+                    <span className="font-mono">{pageCount}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="md:overflow-hidden overflow-x-auto">
+                <div
+                  className="grid gap-2 rounded-xl border border-slate-800 bg-slate-950/40 px-2 py-2 text-xs font-semibold text-slate-200"
+                  style={{
+                    gridTemplateColumns: `minmax(220px, 1.8fr) repeat(${totalRoutes}, minmax(70px, 1fr)) 96px`,
+                  }}
+                >
+                  <span className="px-2">Ranking</span>
+                  {Array.from({ length: totalRoutes }).map((_, i) => (
+                    <span key={i} className="px-2 text-right">
+                      R{i + 1}
+                    </span>
+                  ))}
+                  <span className="px-2 text-right">
+                    <span className="inline-flex items-center gap-2 rounded-full bg-rose-500/10 px-2 py-1 text-rose-200">
+                      Total
+                    </span>
+                  </span>
+                </div>
+
+                <div className="mt-2 md:overflow-hidden max-h-[65vh] md:max-h-none overflow-y-auto">
+                  {rankingRows.length === 0 ? (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/30 px-4 py-4 text-sm text-slate-300">
+                      No scores yet.
+                    </div>
+                  ) : (
+                    visibleRows.map((row, localIndex) => {
+                      const globalIndex = pageStartIndex + localIndex;
+                      const showTime = !!selectedBox.timeCriterionEnabled && globalIndex < 3;
+                      const zebra = globalIndex % 2 === 0;
+
+                      return (
+                        <div
+                          key={row.nume}
+                          className={`grid gap-2 rounded-xl border px-2 py-2 text-sm ${
+                            zebra
+                              ? 'border-slate-800 bg-slate-950/30'
+                              : 'border-slate-800 bg-slate-900/25'
+                          }`}
+                          style={{
+                            gridTemplateColumns: `minmax(220px, 1.8fr) repeat(${totalRoutes}, minmax(70px, 1fr)) 96px`,
+                          }}
+                        >
+                          <div className="px-2">
+                            <div className="flex items-baseline gap-2">
+                              <span
+                                className={`inline-flex w-8 justify-center font-mono text-xs ${
+                                  row.rank === 1
+                                    ? 'text-amber-200'
+                                    : row.rank === 2
+                                      ? 'text-slate-200'
+                                      : row.rank === 3
+                                        ? 'text-rose-200'
+                                        : 'text-slate-400'
+                                }`}
+                              >
+                                {row.rank}
+                              </span>
+                              <span className="font-medium text-slate-50">
+                                {sanitizeCompetitorName(row.nume)}
+                              </span>
+                            </div>
+                          </div>
+
+                          {Array.from({ length: totalRoutes }).map((_, i) => {
+                            const scoreVal = row.raw[i];
+                            const timeVal = row.rawTimes[i];
+                            const maxHolds = Array.isArray(selectedBox.holdsCounts)
+                              ? selectedBox.holdsCounts?.[i]
+                              : undefined;
+                            const isScoreNumber =
+                              typeof scoreVal === 'number' && Number.isFinite(scoreVal);
+                            const isTop =
+                              isScoreNumber &&
+                              typeof maxHolds === 'number' &&
+                              scoreVal === Number(maxHolds);
+
+                            return (
+                              <div
+                                key={i}
+                                className="px-2 text-right flex flex-col items-end justify-center leading-tight"
+                              >
+                                {isScoreNumber ? (
+                                  isTop ? (
+                                    <span className="inline-flex items-center rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-xs font-semibold text-cyan-200">
+                                      TOP
+                                    </span>
+                                  ) : (
+                                    <span className="font-mono text-slate-100">
+                                      {scoreVal.toFixed(1)}
+                                    </span>
+                                  )
+                                ) : (
+                                  <span className="text-slate-500">—</span>
+                                )}
+
+                                {showTime && typeof timeVal === 'number' && (
+                                  <span className="mt-0.5 text-xs font-mono text-slate-400">
+                                    {formatSeconds(timeVal)}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+
+                          <div className="px-2 text-right">
+                            <span className="inline-flex w-full justify-end rounded-full bg-rose-500/10 px-2 py-1 font-mono text-rose-200">
+                              {row.total.toFixed(3)}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </section>
+          </main>
+        ) : (
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/35 p-4">
+            <div className="text-sm text-slate-300">No initiated categories yet.</div>
+          </section>
+        )}
       </div>
     </div>
   );

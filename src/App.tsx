@@ -1,23 +1,82 @@
-import React, { FC } from 'react';
+import React, { FC, Suspense, lazy } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import ErrorBoundary from './components/ErrorBoundary';
 import { AppStateProvider } from './utilis/useAppState';
-import ControlPanel from './components/ControlPanel';
-import ContestPage from './components/ContestPage';
-import JudgePage from './components/JudgePage';
-import AdminAuditPage from './components/AdminAuditPage';
-import RankingsPage from './components/RankingsPage';
+import {
+  ControlPanelSkeleton,
+  ContestPageSkeleton,
+  JudgePageSkeleton,
+  RankingsPageSkeleton,
+  CardSkeleton,
+} from './components/Skeleton';
+
+// Lazy-loaded route components for code splitting
+const ControlPanel = lazy(() => import('./components/ControlPanel'));
+const ContestPage = lazy(() => import('./components/ContestPage'));
+const JudgePage = lazy(() => import('./components/JudgePage'));
+const AdminAuditPage = lazy(() => import('./components/AdminAuditPage'));
+const RankingsPage = lazy(() => import('./components/RankingsPage'));
+const ThemeDemo = lazy(() => import('./components/ThemeDemo'));
+
+// Generic fallback for pages without specific skeletons
+const PageLoader: FC = () => (
+  <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900">
+    <div className="flex flex-col items-center gap-4">
+      <div className="h-10 w-10 animate-spin rounded-full border-4 border-cyan-400 border-t-transparent" />
+      <span className="text-sm text-slate-400 tracking-wide">Loading...</span>
+    </div>
+  </div>
+);
+
+// Wrapper components with route-specific skeletons
+const ControlPanelWithSkeleton: FC = () => (
+  <Suspense fallback={<ControlPanelSkeleton />}>
+    <ControlPanel />
+  </Suspense>
+);
+
+const ContestPageWithSkeleton: FC = () => (
+  <Suspense fallback={<ContestPageSkeleton />}>
+    <ContestPage />
+  </Suspense>
+);
+
+const JudgePageWithSkeleton: FC = () => (
+  <Suspense fallback={<JudgePageSkeleton />}>
+    <JudgePage />
+  </Suspense>
+);
+
+const RankingsPageWithSkeleton: FC = () => (
+  <Suspense fallback={<RankingsPageSkeleton />}>
+    <RankingsPage />
+  </Suspense>
+);
+
+const AdminAuditPageWithSkeleton: FC = () => (
+  <Suspense fallback={<div className="min-h-screen bg-gray-900 p-6"><CardSkeleton /></div>}>
+    <AdminAuditPage />
+  </Suspense>
+);
 
 const App: FC = () => {
   return (
     <ErrorBoundary>
       <AppStateProvider>
         <Routes>
-          <Route path="/" element={<ControlPanel />} />
-          <Route path="/contest/:boxId" element={<ContestPage />} />
-          <Route path="/judge/:boxId" element={<JudgePage />} />
-          <Route path="/rankings" element={<RankingsPage />} />
-          <Route path="/admin/audit" element={<AdminAuditPage />} />
+          <Route path="/" element={<ControlPanelWithSkeleton />} />
+          <Route path="/contest/:boxId" element={<ContestPageWithSkeleton />} />
+          <Route path="/judge/:boxId" element={<JudgePageWithSkeleton />} />
+          <Route path="/rankings" element={<RankingsPageWithSkeleton />} />
+          <Route path="/admin/audit" element={<AdminAuditPageWithSkeleton />} />
+          <Route
+            path="/theme-demo"
+            element={
+              <Suspense fallback={<PageLoader />}>
+                <ThemeDemo />
+              </Suspense>
+            }
+          />
         </Routes>
       </AppStateProvider>
     </ErrorBoundary>

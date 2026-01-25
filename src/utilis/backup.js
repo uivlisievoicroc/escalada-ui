@@ -1,5 +1,4 @@
 import { fetchWithRetry } from './fetch';
-import { getAuthHeader } from './auth';
 
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
 const API_BASE = `${API_PROTOCOL}://${window.location.hostname}:8000/api/admin`;
@@ -7,7 +6,7 @@ const API_BASE = `${API_PROTOCOL}://${window.location.hostname}:8000/api/admin`;
 export async function downloadBoxBackup(boxId) {
   const res = await fetchWithRetry(`${API_BASE}/backup/box/${boxId}`, {
     method: 'GET',
-    headers: { ...getAuthHeader() },
+    credentials: 'include',
   });
   if (!res.ok) {
     const text = await res.text();
@@ -19,7 +18,7 @@ export async function downloadBoxBackup(boxId) {
 export async function downloadFullBackup() {
   const res = await fetchWithRetry(`${API_BASE}/backup/full`, {
     method: 'GET',
-    headers: { ...getAuthHeader() },
+    credentials: 'include',
   });
   if (!res.ok) {
     const text = await res.text();
@@ -31,7 +30,7 @@ export async function downloadFullBackup() {
 export async function getLastBackupMeta() {
   const res = await fetchWithRetry(`${API_BASE}/backup/last`, {
     method: 'GET',
-    headers: { ...getAuthHeader() },
+    credentials: 'include',
   });
   if (!res.ok) {
     const text = await res.text();
@@ -43,7 +42,7 @@ export async function getLastBackupMeta() {
 export async function downloadLastBackup() {
   const res = await fetchWithRetry(`${API_BASE}/backup/last?download=1`, {
     method: 'GET',
-    headers: { ...getAuthHeader() },
+    credentials: 'include',
   });
   if (!res.ok) {
     const text = await res.text();
@@ -63,7 +62,7 @@ export async function downloadLastBackup() {
 export async function downloadBoxCsv(boxId) {
   const res = await fetchWithRetry(`${API_BASE}/export/box/${boxId}`, {
     method: 'GET',
-    headers: { ...getAuthHeader() },
+    credentials: 'include',
   });
   if (!res.ok) {
     const text = await res.text();
@@ -83,7 +82,7 @@ export async function downloadBoxCsv(boxId) {
 export async function downloadOfficialResultsZip(boxId) {
   const res = await fetchWithRetry(`${API_BASE}/export/official/box/${boxId}`, {
     method: 'GET',
-    headers: { ...getAuthHeader() },
+    credentials: 'include',
   });
   if (!res.ok) {
     const text = await res.text();

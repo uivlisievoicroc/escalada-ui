@@ -13,9 +13,8 @@ import useWebSocketWithHeartbeat from '../utilis/useWebSocketWithHeartbeat';
 import { debugLog, debugWarn, debugError } from '../utilis/debug';
 import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
 import {
-  getAuthHeader,
-  getStoredToken,
   clearAuth,
+  isAuthenticated,
   getStoredRole,
   getStoredBoxes,
 } from '../utilis/auth';
@@ -23,6 +22,7 @@ import type { WebSocketMessage, TimerState, StateSnapshot } from '../types';
 import ModalScore from './ModalScore';
 import ModalModifyScore from './ModalModifyScore';
 import LoginOverlay from './LoginOverlay';
+import { JudgePageSkeleton } from './Skeleton';
 
 const JudgePage: FC = () => {
   debugLog('🟡 [JudgePage] Component rendering START');
@@ -44,9 +44,12 @@ const JudgePage: FC = () => {
   const progressPendingRef = useRef(false);
   const [progressPending, setProgressPending] = useState<boolean>(false);
   const [showScoreModal, setShowScoreModal] = useState<boolean>(false);
+  const [scoreSubmitPending, setScoreSubmitPending] = useState<boolean>(false);
+  const [scoreSubmitError, setScoreSubmitError] = useState<string | null>(null);
   const [maxScore, setMaxScore] = useState<number>(0);
-  const [authToken, setAuthToken] = useState<string | null>(() => getStoredToken());
-  const [showLogin, setShowLogin] = useState<boolean>(() => !getStoredToken());
+  const [authActive, setAuthActive] = useState<boolean>(() => isAuthenticated());
+  const [showLogin, setShowLogin] = useState<boolean>(() => !isAuthenticated());
+  const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
   const [registeredTime, setRegisteredTime] = useState<number | null>(() => {
     const raw = safeGetItem(`registeredTime-${idx}`);
     const parsed = parseInt(raw, 10);
@@ -85,10 +88,10 @@ const JudgePage: FC = () => {
     (reason: string) => {
       debugWarn('🔐 [JudgePage] Forcing re-auth:', reason);
       clearAuth();
-      setAuthToken(null);
+      setAuthActive(false);
       setShowLogin(true);
     },
-    [setAuthToken, setShowLogin],
+    [setAuthActive, setShowLogin],
   );
 
   const getTimerPreset = () => {
@@ -139,15 +142,16 @@ const JudgePage: FC = () => {
   }, [idx]);
 
   // Build WebSocket URL - memoized to prevent infinite render loop
+  // Token is in httpOnly cookie - WebSocket will use it automatically
   const WS_URL = useMemo(() => {
-    const token = getStoredToken();
-    if (!token) {
+    if (!authActive) {
       return '';
     }
-    const url = `${WS_PROTOCOL}://${window.location.hostname}:8000/api/ws/${idx}?token=${encodeURIComponent(token)}`;
+    // No token in URL - WebSocket auth will use httpOnly cookie
+    const url = `${WS_PROTOCOL}://${window.location.hostname}:8000/api/ws/${idx}`;
     debugLog('🟡 [JudgePage] WS_URL memoized:', url);
     return url;
-  }, [idx, WS_PROTOCOL, authToken]);
+  }, [idx, WS_PROTOCOL, authActive]);
 
   // Message handler for all incoming WS messages
   const handleWsMessage = useCallback(
@@ -308,7 +312,7 @@ const JudgePage: FC = () => {
       snapshotTimeoutRef.current = setTimeout(() => {
         debugWarn('📗 [JudgePage] No STATE_SNAPSHOT received in 2s, fetching via HTTP');
 
-        fetch(`${API_BASE}/api/state/${idx}`, { headers: { ...getAuthHeader() } })
+        fetch(`${API_BASE}/api/state/${idx}`, { credentials: 'include' })
           .then((res) => {
             if (res.status === 401 || res.status === 403) {
               forceReauth(`http_state_fallback_${res.status}`);
@@ -389,7 +393,7 @@ const JudgePage: FC = () => {
         (async () => {
           try {
             const res = await fetch(`${API_BASE}/api/state/${idx}`, {
-              headers: { ...getAuthHeader() },
+              credentials: 'include',
             });
             if (res.status === 401 || res.status === 403) {
               forceReauth(`http_state_refresh_${res.status}`);
@@ -439,11 +443,11 @@ const JudgePage: FC = () => {
 
   // Fetch initial state snapshot on mount
   useEffect(() => {
-    if (!authToken) return;
+    if (!authActive) return;
     (async () => {
       try {
         const res = await fetch(`${API_BASE}/api/state/${idx}`, {
-          headers: { ...getAuthHeader() },
+          credentials: 'include',
         });
         if (res.status === 401 || res.status === 403) {
           forceReauth(`http_state_init_${res.status}`);
@@ -465,12 +469,14 @@ const JudgePage: FC = () => {
             setTimeCriterionEnabled(st.timeCriterionEnabled);
             safeSetItem(`timeCriterionEnabled-${idx}`, st.timeCriterionEnabled ? 'on' : 'off');
           }
+          setIsInitialLoading(false);
         }
       } catch (e) {
         debugError('Error fetching initial state:', e);
+        setIsInitialLoading(false);
       }
     })();
-  }, [idx, API_BASE, applyTimerPresetSnapshot, authToken, forceReauth]);
+  }, [idx, API_BASE, applyTimerPresetSnapshot, authActive, forceReauth]);
 
   useEffect(() => {
     const syncFromStorage = () => {
@@ -527,7 +533,7 @@ const JudgePage: FC = () => {
     let snapshot: any = {};
     try {
       const res = await fetch(`${API_BASE}/api/state/${idx}`, {
-        headers: { ...getAuthHeader() },
+        credentials: 'include',
       });
       if (res.status === 401 || res.status === 403) {
         forceReauth(`http_state_latest_${res.status}`);
@@ -670,6 +676,7 @@ const JudgePage: FC = () => {
 
   // Handler for Insert Score
   const handleInsertScore = () => {
+    setScoreSubmitError(null);
     setShowScoreModal(true);
   };
 
@@ -725,19 +732,24 @@ const JudgePage: FC = () => {
         <LoginOverlay
           defaultUsername={defaultJudgeUsername}
           onSuccess={() => {
-            setAuthToken(getStoredToken());
+            setAuthActive(true);
             setShowLogin(false);
             pullLatestState();
           }}
         />
       )}
-      <div className="p-20 flex flex-col gap-2">
-        {showWsBanner && wsStatus !== 'open' && (
-          <div className="mb-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
-            WS: {wsStatus}.{' '}
-            {wsError ? `(${wsError})` : 'Check host IP and that port 8000 is reachable.'}
-          </div>
-        )}
+      {isInitialLoading ? (
+        <JudgePageSkeleton />
+      ) : (
+        <div className="p-20 flex flex-col gap-2">
+          {showWsBanner && wsStatus !== 'open' && (
+            <div className="mb-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
+              WS: {wsStatus}.{' '}
+              {wsError
+                ? `(${wsError})`
+                : 'Check same Wi‑Fi, Vite dev server host (0.0.0.0), and that port 8000 is reachable.'}
+            </div>
+          )}
         {!isRunning && !isPaused && (
           <button
             className="px-3 py-1 bg-blue-600 text-white rounded disabled:opacity-50"
@@ -822,9 +834,19 @@ const JudgePage: FC = () => {
           competitor={currentClimber}
           initialScore={holdCount}
           maxScore={maxScore}
-          registeredTime={timeCriterionEnabled ? registeredTime : undefined}
-          onClose={() => setShowScoreModal(false)}
+          registeredTime={
+            timeCriterionEnabled && typeof registeredTime === 'number' ? registeredTime : undefined
+          }
+          submitPending={scoreSubmitPending}
+          submitError={scoreSubmitError}
+          closeOnSubmit={false}
+          onClose={() => {
+            setScoreSubmitError(null);
+            setShowScoreModal(false);
+          }}
           onSubmit={async (score: number) => {
+            setScoreSubmitPending(true);
+            setScoreSubmitError(null);
             let timeToSend: number | null = null;
             if (timeCriterionEnabled) {
               if (typeof registeredTime === 'number') {
@@ -849,33 +871,59 @@ const JudgePage: FC = () => {
                 }
               }
             }
-            await submitScore(
-              idx,
-              score,
-              currentClimber,
-              typeof timeToSend === 'number' ? timeToSend : undefined,
-            );
-            clearRegisteredTime();
-            setShowScoreModal(false);
-            interface Competitor {
-              nume: string;
-              marked?: boolean;
-            }
-            interface Box {
-              concurenti?: Competitor[];
-            }
-            const boxes: Box[] = JSON.parse(safeGetItem('listboxes') || '[]');
-            const box = boxes?.[idx];
-            if (box?.concurenti) {
-              const competitorIdx = box.concurenti.findIndex((c) => c.nume === currentClimber);
-              if (competitorIdx !== -1) {
-                box.concurenti[competitorIdx].marked = true;
-                safeSetItem('listboxes', JSON.stringify(boxes));
+            try {
+              const result: any = await submitScore(
+                idx,
+                score,
+                currentClimber,
+                typeof timeToSend === 'number' ? timeToSend : undefined,
+              );
+              if (result?.status === 'ignored') {
+                await pullLatestState();
+                const retry: any = await submitScore(
+                  idx,
+                  score,
+                  currentClimber,
+                  typeof timeToSend === 'number' ? timeToSend : undefined,
+                );
+                if (retry?.status === 'ignored') {
+                  await pullLatestState();
+                  setScoreSubmitError('Score ignored. Refresh state and try again.');
+                  return false;
+                }
               }
+              clearRegisteredTime();
+              setShowScoreModal(false);
+              interface Competitor {
+                nume: string;
+                marked?: boolean;
+              }
+              interface Box {
+                concurenti?: Competitor[];
+              }
+              const boxes: Box[] = JSON.parse(safeGetItem('listboxes') || '[]');
+              const box = boxes?.[idx];
+              if (box?.concurenti) {
+                const competitorIdx = box.concurenti.findIndex((c) => c.nume === currentClimber);
+                if (competitorIdx !== -1) {
+                  box.concurenti[competitorIdx].marked = true;
+                  safeSetItem('listboxes', JSON.stringify(boxes));
+                }
+              }
+              return true;
+            } catch (err: any) {
+              if (err?.status === 401 || err?.status === 403) {
+                forceReauth(`submit_score_${err?.status}`);
+              }
+              setScoreSubmitError('Failed to submit score. Check connection and retry.');
+              return false;
+            } finally {
+              setScoreSubmitPending(false);
             }
           }}
         />
       </div>
+      )}
     </>
   );
 };
