@@ -18,6 +18,11 @@ const AdminAuditPage = lazy(() => import('./components/AdminAuditPage'));
 const RankingsPage = lazy(() => import('./components/RankingsPage'));
 const ThemeDemo = lazy(() => import('./components/ThemeDemo'));
 
+// Public pages (no auth required)
+const PublicHub = lazy(() => import('./components/PublicHub'));
+const PublicLiveClimbing = lazy(() => import('./components/PublicLiveClimbing'));
+const PublicRankings = lazy(() => import('./components/PublicRankings'));
+
 // Generic fallback for pages without specific skeletons
 const PageLoader: FC = () => (
   <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900">
@@ -74,6 +79,31 @@ const App: FC = () => {
             element={
               <Suspense fallback={<PageLoader />}>
                 <ThemeDemo />
+              </Suspense>
+            }
+          />
+          {/* Public routes (QR access, no auth) */}
+          <Route
+            path="/public"
+            element={
+              <Suspense fallback={<PageLoader />}>
+                <PublicHub />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/public/rankings"
+            element={
+              <Suspense fallback={<RankingsPageSkeleton />}>
+                <PublicRankings />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/public/live-climbing/:boxId"
+            element={
+              <Suspense fallback={<ContestPageSkeleton />}>
+                <PublicLiveClimbing />
               </Suspense>
             }
           />

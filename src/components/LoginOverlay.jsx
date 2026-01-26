@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { login } from '../utilis/auth';
 import { debugError } from '../utilis/debug';
+import styles from './ControlPanel.module.css';
 
 const LoginOverlay = ({ onSuccess, defaultUsername = '' }) => {
   const [username, setUsername] = useState(defaultUsername);
@@ -35,68 +36,64 @@ const LoginOverlay = ({ onSuccess, defaultUsername = '' }) => {
   };
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.65)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 9999,
-      }}
-    >
-      <form
-        onSubmit={handleSubmit}
-        style={{
-          background: '#fff',
-          padding: '24px',
-          borderRadius: '12px',
-          width: '320px',
-          boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '12px',
-        }}
-      >
-        <h3 style={{ margin: 0 }}>Autentificare arbitru</h3>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <span>User</span>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            required
-            autoFocus={!defaultUsername}
-            style={{ padding: '8px 10px' }}
-          />
-        </label>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <span>Parolă</span>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            style={{ padding: '8px 10px' }}
-          />
-        </label>
-        {error && <div style={{ color: 'red', fontSize: '0.9rem' }}>{error}</div>}
-        <button
-          type="submit"
-          disabled={loading}
-          style={{
-            padding: '10px 12px',
-            background: '#111827',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '8px',
-            cursor: 'pointer',
-          }}
-        >
-          {loading ? 'Se conectează…' : 'Intră'}
-        </button>
-      </form>
+    <div className={styles.modalOverlay}>
+      <div className={styles.modalCard} role="dialog" aria-modal="true">
+        <div className={styles.modalHeader}>
+          <div>
+            <div className={styles.modalTitle}>Autentificare arbitru</div>
+          </div>
+        </div>
+
+        {error && (
+          <div className={`${styles.modalAlert} ${styles.modalAlertError}`}>{error}</div>
+        )}
+
+        <form onSubmit={handleSubmit} className={styles.modalContent}>
+          <div className={styles.modalField}>
+            <label className={styles.modalLabel} htmlFor="login-username">
+              User
+            </label>
+            <input
+              id="login-username"
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              autoComplete="username"
+              autoFocus={!defaultUsername}
+              disabled={loading}
+              className={styles.modalInput}
+            />
+          </div>
+
+          <div className={styles.modalField}>
+            <label className={styles.modalLabel} htmlFor="login-password">
+              Parolă
+            </label>
+            <input
+              id="login-password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              autoComplete="current-password"
+              autoFocus={!!defaultUsername}
+              disabled={loading}
+              className={styles.modalInput}
+            />
+          </div>
+
+          <div className={styles.modalActions}>
+            <button
+              type="submit"
+              className="modern-btn modern-btn-primary btn-press-effect"
+              disabled={loading}
+            >
+              {loading ? 'Se conectează…' : 'Intră'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 };

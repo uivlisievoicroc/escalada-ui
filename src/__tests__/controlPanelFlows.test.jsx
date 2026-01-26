@@ -142,4 +142,35 @@ describe('ControlPanel button flows', () => {
 
     expect(screen.queryByText('Register Time')).toBeNull();
   });
+
+  it('opens Insert Score modal without ContestPage open', async () => {
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ControlPanel />
+        </MemoryRouter>,
+      );
+    });
+
+    await screen.findAllByText(/Start Timer/i);
+
+    // Simulate a current climber update (normally written by ContestPage/Judge flows)
+    await act(async () => {
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'currentClimber-0',
+          newValue: JSON.stringify('Ion'),
+        }),
+      );
+    });
+
+    const insertButtons = await screen.findAllByText(/Insert Score/i);
+    expect(insertButtons.length).toBeGreaterThanOrEqual(1);
+
+    await act(async () => {
+      insertButtons[0].click();
+    });
+
+    expect(await screen.findByLabelText('Score')).toBeInTheDocument();
+  });
 });

@@ -161,6 +161,24 @@ const isTabAlive = (t: Window | null): boolean => {
 const buildJudgeUrl = (boxId: number, categorie: string): string => {
   return `${window.location.origin}/#/judge/${boxId}?cat=${encodeURIComponent(categorie)}`;
 };
+const buildPublicHubUrl = (): string => {
+  return `${window.location.origin}/#/public`;
+};
+
+const CONTROL_PANEL_TIMER_SYNC_SOURCE_KEY = 'escalada:controlpanel:timerSyncSource';
+const CONTROL_PANEL_TIMER_SYNC_SOURCE_PREFIX = 'timer_sync_source:controlpanel:';
+const getControlPanelTimerSyncSource = (): string => {
+  try {
+    const existing = sessionStorage.getItem(CONTROL_PANEL_TIMER_SYNC_SOURCE_KEY);
+    if (existing) return existing;
+    const id = `${CONTROL_PANEL_TIMER_SYNC_SOURCE_PREFIX}${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+    sessionStorage.setItem(CONTROL_PANEL_TIMER_SYNC_SOURCE_KEY, id);
+    return id;
+  } catch {
+    return `${CONTROL_PANEL_TIMER_SYNC_SOURCE_PREFIX}no-storage`;
+  }
+};
+
 const ModalScore = lazy(() => import('./ModalScore'));
 const ControlPanel: FC = () => {
   // Ignoră WS close noise la demontare (attach once, with cleanup)
@@ -185,6 +203,8 @@ const ControlPanel: FC = () => {
   const [judgePasswordBoxId, setJudgePasswordBoxId] = useState<number | null>(null);
   const [showQrDialog, setShowQrDialog] = useState<boolean>(false);
   const [adminQrUrl, setAdminQrUrl] = useState<string>('');
+  const [showPublicQrDialog, setShowPublicQrDialog] = useState<boolean>(false);
+  const [publicQrUrl, setPublicQrUrl] = useState<string>('');
   const [showSetPasswordDialog, setShowSetPasswordDialog] = useState<boolean>(false);
   const [showRoutesetterDialog, setShowRoutesetterDialog] = useState<boolean>(false);
   const [routesetterBoxId, setRoutesetterBoxId] = useState<number | null>(null);
@@ -199,6 +219,10 @@ const ControlPanel: FC = () => {
     { type: 'success' | 'error'; message: string } | null
   >(null);
   const [controlTimers, setControlTimers] = useState<{ [boxId: number]: number }>({});
+  const controlTimersRef = useRef<{ [boxId: number]: number }>(controlTimers);
+  useEffect(() => {
+    controlTimersRef.current = controlTimers;
+  }, [controlTimers]);
   const loadListboxes = (): Box[] => {
     const saved = safeGetItem('listboxes');
     const globalPreset = readClimbingTime();
@@ -289,6 +313,11 @@ const ControlPanel: FC = () => {
   // WebSocket: subscribe to each box channel and mirror updates from JudgePage
   const wsRefs = useRef<{ [boxId: string]: WebSocket }>({});
   const disconnectFnsRef = useRef<{ [boxId: string]: () => void }>({}); // TASK 2.4: Store disconnect functions for cleanup
+  const timerSyncSourceRef = useRef<string>(getControlPanelTimerSyncSource());
+  const lastExternalTimerSyncAtRef = useRef<Record<number, number>>({});
+  const timerEngineEndAtMsRef = useRef<Record<number, number | null>>({});
+  const timerEngineLastRemainingRef = useRef<Record<number, number>>({});
+  const timerEngineLastSentAtRef = useRef<Record<number, number>>({});
   const getTimeCriterionEnabled = (boxId: number): boolean => {
     const stored = timeCriterionByBox[boxId];
     if (typeof stored === 'boolean') return stored;
@@ -404,6 +433,14 @@ const ControlPanel: FC = () => {
             case 'TIMER_SYNC':
               if (typeof msg.remaining === 'number') {
                 setControlTimers((prev) => ({ ...prev, [idx]: Number.isFinite(msg.remaining) ? msg.remaining : 0 }));
+              }
+              // Track external timer sources so we don't compete with ContestPage on another device/tab.
+              if (typeof msg.competitor === 'string') {
+                if (msg.competitor !== timerSyncSourceRef.current) {
+                  lastExternalTimerSyncAtRef.current[idx] = Date.now();
+                }
+              } else {
+                lastExternalTimerSyncAtRef.current[idx] = Date.now();
               }
               break;
             case 'PROGRESS_UPDATE':
@@ -785,6 +822,34 @@ const ControlPanel: FC = () => {
 	    }
 	  };
 
+  const sendTimerSync = async (boxId: number, remaining: number): Promise<void> => {
+    const sessionId = getSessionId(boxId);
+    if (!sessionId) return;
+
+    const config = getApiConfig();
+    try {
+      const res = await fetch(config.API_CP, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          boxId,
+          type: 'TIMER_SYNC',
+          remaining,
+          sessionId,
+          competitor: timerSyncSourceRef.current,
+        }),
+      });
+      if (res.status === 401 || res.status === 403) {
+        clearAuth();
+        setAdminRole(null);
+        setShowAdminLogin(true);
+      }
+    } catch (err) {
+      debugError(`[ControlPanel] TIMER_SYNC failed (box ${boxId})`, err);
+    }
+  };
+
   interface ReadCurrentTimerSec {
     (idx: number): number | null;
   }
@@ -842,6 +907,82 @@ const ControlPanel: FC = () => {
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
   }, [listboxes]);
+
+  // Headless timer engine: if no external TIMER_SYNC arrives, ControlPanel drives the countdown.
+  useEffect(() => {
+    const hasRunning = Object.values(timerStates).some((s) => s === 'running');
+    if (!hasRunning) {
+      // Important: if the last running timer was paused, we still need to clear any stored end time.
+      // Otherwise RESUME will reuse the old endAt (as if time kept running "in background").
+      const boxes = listboxesRef.current;
+      for (let boxId = 0; boxId < boxes.length; boxId += 1) {
+        timerEngineEndAtMsRef.current[boxId] = null;
+        delete timerEngineLastRemainingRef.current[boxId];
+        delete timerEngineLastSentAtRef.current[boxId];
+      }
+      return;
+    }
+
+    const tick = () => {
+      const now = Date.now();
+      const boxes = listboxesRef.current;
+
+      for (let boxId = 0; boxId < boxes.length; boxId += 1) {
+        const box = boxes[boxId];
+        const state = timerStatesRef.current[boxId] || 'idle';
+        if (!box?.initiated || state !== 'running') {
+          timerEngineEndAtMsRef.current[boxId] = null;
+          continue;
+        }
+
+        // If someone else is syncing (ContestPage on another device/tab), don't compete.
+        const lastExternal = lastExternalTimerSyncAtRef.current[boxId] || 0;
+        if (now - lastExternal < 1500) {
+          timerEngineEndAtMsRef.current[boxId] = null;
+          continue;
+        }
+
+        const endAt = timerEngineEndAtMsRef.current[boxId];
+        if (endAt == null) {
+          const fromState = controlTimersRef.current[boxId];
+          const fromStorageRaw = safeGetItem(`timer-${boxId}`);
+          const fromStorage = fromStorageRaw != null ? parseInt(fromStorageRaw, 10) : NaN;
+
+          const presetRaw =
+            safeGetItem(`climbingTime-${boxId}`) || box?.timerPreset || readClimbingTime() || '05:00';
+          const presetParsed = (() => {
+            if (!/^\d{1,2}:\d{2}$/.test(presetRaw)) return 300;
+            const [m, s] = presetRaw.split(':').map(Number);
+            return (Number.isFinite(m) ? m : 5) * 60 + (Number.isFinite(s) ? s : 0);
+          })();
+
+          const initialRemaining =
+            typeof fromState === 'number' && Number.isFinite(fromState)
+              ? fromState
+              : Number.isFinite(fromStorage)
+                ? fromStorage
+                : presetParsed;
+          timerEngineEndAtMsRef.current[boxId] = now + Math.max(0, initialRemaining) * 1000;
+        }
+
+        const end = timerEngineEndAtMsRef.current[boxId];
+        if (end == null) continue;
+        const remaining = Math.max(0, Math.ceil((end - now) / 1000));
+
+        const lastRemaining = timerEngineLastRemainingRef.current[boxId];
+        const lastSentAt = timerEngineLastSentAtRef.current[boxId] || 0;
+        if (remaining !== lastRemaining && now - lastSentAt >= 900) {
+          timerEngineLastRemainingRef.current[boxId] = remaining;
+          timerEngineLastSentAtRef.current[boxId] = now;
+          setTimerSecondsForBox(boxId, remaining);
+          sendTimerSync(boxId, remaining);
+        }
+      }
+    };
+
+    const interval = setInterval(tick, 250);
+    return () => clearInterval(interval);
+  }, [timerStates]);
 
   useEffect(() => {
     const initial: { [boxId: number]: number } = {};
@@ -1177,6 +1318,18 @@ const ControlPanel: FC = () => {
 	    setCurrentClimbers((prev) => ({ ...prev, [index]: '' }));
 	  };
 
+    const openClimbingPage = (boxId: number): Window | null => {
+      const existingTab = openTabs[boxId];
+      if (isTabAlive(existingTab)) {
+        existingTab?.focus();
+        return existingTab ?? null;
+      }
+      const url = `${window.location.origin}/#/contest/${boxId}`;
+      const tab = window.open(url, '_blank');
+      if (tab) openTabs[boxId] = tab;
+      return tab;
+    };
+
 	  const handleInitiate = (index: number): void => {
 	    // 1. Marchează listbox‑ul ca inițiat
 	    setListboxes((prev) => prev.map((lb, i) => (i === index ? { ...lb, initiated: true } : lb)));
@@ -1190,26 +1343,13 @@ const ControlPanel: FC = () => {
 		      debugError('Failed to persist climbingTime preset on initiate', err);
 		    }
 		    setTimerSecondsForBox(index, presetToSeconds(preset));
-		    // 2. Dacă tab‑ul nu există sau s‑a închis → deschide
-		    const existingTab = openTabs[index];
-	    let tab: Window | null = existingTab;
-	    if (!isTabAlive(existingTab)) {
-      const url = `${window.location.origin}/#/contest/${index}`;
-      tab = window.open(url, '_blank');
-      if (tab) openTabs[index] = tab;
-    } else {
-      // tab există: adu‑l în față
-      existingTab?.focus();
-    }
 
-		    // 3. Trimite mesaj de (re)inițiere pentru traseul curent prin HTTP+WS
-		    if (tab && !tab.closed) {
-		      const lb = listboxes[index];
-		      // preset already persisted above
-		      // send INIT_ROUTE via HTTP+WS
-		      initRoute(
-		        index,
-		        lb.routeIndex,
+        // 2. Trimite mesaj de (re)inițiere pentru traseul curent prin HTTP+WS
+        // IMPORTANT: nu mai deschide automat pagina de climbing.
+        const lb = listboxes[index];
+        initRoute(
+          index,
+          lb.routeIndex,
         lb.holdsCount,
         lb.concurenti,
         preset,
@@ -1217,7 +1357,8 @@ const ControlPanel: FC = () => {
         lb.holdsCounts,
         lb.categorie,
       );
-    }
+      // 3. Initialize remaining time for public/live views even if ContestPage isn't open.
+      sendTimerSync(index, presetToSeconds(preset));
   };
 
   // Advance to the next route on demand
@@ -1281,6 +1422,7 @@ const ControlPanel: FC = () => {
         updatedBox.holdsCounts,
         updatedBox.categorie,
       );
+      sendTimerSync(index, presetToSeconds(getTimerPreset(index)));
     }
   };
   // --- handlere globale pentru butoane optimiste ------------------
@@ -1654,6 +1796,8 @@ const ControlPanel: FC = () => {
 	      setUsedHalfHold((prev) => ({ ...prev, [boxIdx]: false }));
 	      setTimerStates((prev) => ({ ...prev, [boxIdx]: 'idle' }));
 	      setTimerSecondsForBox(boxIdx, defaultTimerSec(boxIdx));
+        // Keep public/live views in sync even when ContestPage isn't open.
+        sendTimerSync(boxIdx, defaultTimerSec(boxIdx));
 	      setShowScoreModal(false);
 	      setActiveBoxId(null);
 	      clearRegisteredTime(boxIdx);
@@ -1771,6 +1915,12 @@ const ControlPanel: FC = () => {
     const url = buildJudgeUrl(boxIdx, box.categorie);
     setAdminQrUrl(url);
     setShowQrDialog(true);
+  };
+
+  const openPublicQrDialog = (): void => {
+    const url = buildPublicHubUrl();
+    setPublicQrUrl(url);
+    setShowPublicQrDialog(true);
   };
 
   const openSetJudgePasswordDialog = (boxIdx: number): void => {
@@ -1939,6 +2089,19 @@ const ControlPanel: FC = () => {
       debugWarn('Failed to copy QR URL via clipboard API', err);
     }
     window.prompt('Copy the judge URL:', adminQrUrl);
+  };
+
+  const handleCopyPublicQrUrl = async (): Promise<void> => {
+    if (!publicQrUrl) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(publicQrUrl);
+        return;
+      }
+    } catch (err) {
+      debugWarn('Failed to copy public QR URL via clipboard API', err);
+    }
+    window.prompt('Copy the public URL:', publicQrUrl);
   };
 
   const normalizeTimerPreset = (value: string): string | null => {
@@ -2162,6 +2325,17 @@ const ControlPanel: FC = () => {
                     );
                   })}
                 </nav>
+
+                <div className="p-2 pt-0">
+                  <button
+                    className="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm transition text-slate-300 hover:bg-white/5 border border-transparent disabled:opacity-50"
+                    onClick={openPublicQrDialog}
+                    disabled={adminRole !== 'admin'}
+                    type="button"
+                  >
+                    Show public QR
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -2438,6 +2612,52 @@ const ControlPanel: FC = () => {
           </div>
         </div>
       )}
+
+        {showPublicQrDialog && (
+          <div className={styles.modalOverlay}>
+            <div className={styles.modalCard}>
+              <div className={styles.modalHeader}>
+                <div>
+                  <div className={styles.modalTitle}>Public QR</div>
+                  <div className={styles.modalSubtitle}>spectators (read-only)</div>
+                </div>
+                <button
+                  className="modern-btn modern-btn-sm modern-btn-ghost"
+                  onClick={() => setShowPublicQrDialog(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+              </div>
+              <div className={styles.modalContent}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
+                  <QRCode value={publicQrUrl} size={180} />
+                  <div
+                    style={{
+                      width: '100%',
+                      padding: '12px',
+                      background: 'rgba(0, 0, 0, 0.4)',
+                      border: '1px solid var(--border-medium)',
+                      borderRadius: 'var(--radius-md)',
+                      fontSize: '12px',
+                      color: 'var(--text-secondary)',
+                      wordBreak: 'break-all',
+                    }}
+                  >
+                    {publicQrUrl}
+                  </div>
+                  <button
+                    className="modern-btn modern-btn-ghost"
+                    onClick={handleCopyPublicQrUrl}
+                    type="button"
+                  >
+                    Copy URL
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
 	      {showSetPasswordDialog && (
 	        <div className={styles.modalOverlay}>
@@ -2717,6 +2937,14 @@ const ControlPanel: FC = () => {
               </div>
 
               <div className={styles.boxActions}>
+                <button
+                  className="modern-btn modern-btn-ghost"
+                  onClick={() => openClimbingPage(idx)}
+                  type="button"
+                >
+                  Open Climbing Page
+                </button>
+
                 {!lb.initiated && (
                   <button
                     className={`modern-btn modern-btn-success ${loadingBoxes.has(idx) ? 'loading' : ''}`}
@@ -2839,6 +3067,13 @@ const ControlPanel: FC = () => {
                   className="modern-btn modern-btn-warning btn-press-effect"
                   onClick={() => {
                     setActiveBoxId(idx);
+                    const competitor = currentClimbers[idx] || '';
+                    if (competitor) {
+                      setActiveCompetitor(competitor);
+                      setShowScoreModal(true);
+                      return;
+                    }
+                    // Legacy fallback: if a ContestPage tab is open, it can respond via localStorage.
                     requestActiveCompetitor(idx);
                   }}
                   disabled={!lb.initiated || !currentClimbers[idx]}

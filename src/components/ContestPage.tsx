@@ -329,6 +329,119 @@ const ContestPage: FC = () => {
     const handleMessage = (msg: WebSocketMessage) => {
       if (msg.type === 'STATE_SNAPSHOT') {
         if (+msg.boxId !== Number(boxId)) return;
+        // Hydrate ContestPage from authoritative backend state so opening mid-contest
+        // doesn't reset the UI to the first competitor from localStorage listboxes.
+        if (msg.sessionId) {
+          safeSetItem(`sessionId-${boxId}`, msg.sessionId);
+        }
+        if (typeof msg.boxVersion === 'number') {
+          safeSetItem(`boxVersion-${boxId}`, msg.boxVersion);
+        }
+        if (typeof msg.categorie === 'string') {
+          setCategory(msg.categorie);
+        }
+        if (typeof msg.routeIndex === 'number') {
+          setRouteIdx(msg.routeIndex);
+        }
+        if (typeof msg.holdsCount === 'number') {
+          setHoldsCount(msg.holdsCount);
+        }
+        if (Array.isArray(msg.holdsCounts)) {
+          setHoldsCountsAll(msg.holdsCounts.filter((n: any) => typeof n === 'number'));
+        }
+        if (typeof msg.holdCount === 'number') {
+          setCurrentHold(msg.holdCount);
+        }
+        if (typeof msg.timerPreset === 'string' && msg.timerPreset.trim()) {
+          safeSetItem(`climbingTime-${boxId}`, msg.timerPreset);
+        }
+
+        const competitors = Array.isArray(msg.competitors) ? msg.competitors : [];
+        const names = competitors
+          .filter((c: any) => c && typeof c === 'object' && !c.marked)
+          .map((c: any) => (typeof c.nume === 'string' ? c.nume : ''))
+          .filter((n: string) => !!n.trim());
+
+        const current =
+          typeof msg.currentClimber === 'string' && msg.currentClimber.trim()
+            ? msg.currentClimber
+            : names[0] || '';
+        const currentIdx = current ? names.indexOf(current) : -1;
+
+        const preparing =
+          typeof msg.preparingClimber === 'string' && msg.preparingClimber.trim()
+            ? msg.preparingClimber
+            : currentIdx >= 0
+              ? names[currentIdx + 1] || ''
+              : names[1] || '';
+
+        setClimbing(current);
+        if (preparing) {
+          setPreparing([preparing]);
+          if (currentIdx >= 0) {
+            setRemaining(names.slice(currentIdx + 2));
+          } else {
+            setRemaining(names.filter((n) => n !== current && n !== preparing).slice(1));
+          }
+        } else {
+          setPreparing([]);
+          if (currentIdx >= 0) {
+            setRemaining(names.slice(currentIdx + 1));
+          } else {
+            setRemaining(names.filter((n) => n !== current));
+          }
+        }
+
+        const remainingRaw = typeof msg.remaining === 'number' ? msg.remaining : null;
+        const remainingSec =
+          remainingRaw != null && Number.isFinite(remainingRaw) ? Math.max(0, Math.ceil(remainingRaw)) : null;
+        const presetFallback =
+          typeof msg.timerPresetSec === 'number' && Number.isFinite(msg.timerPresetSec)
+            ? Math.max(0, Math.ceil(msg.timerPresetSec))
+            : null;
+
+        if (msg.timerState === 'running') {
+          const sec = remainingSec ?? presetFallback;
+          if (typeof sec === 'number') {
+            setTimerSec(sec);
+            timerSecRef.current = sec;
+            safeSetItem(`timer-${boxId}`, sec.toString());
+            const owner = safeGetItem(`tick-owner-${boxId}`);
+            if (!owner) {
+              safeSetItem(`tick-owner-${boxId}`, window.name || 'tick-owner');
+            }
+            const nextEnd = Date.now() + sec * 1000;
+            setEndTimeMs(nextEnd);
+            endTimeRef.current = nextEnd;
+            setRunning(true);
+            broadcastRemaining(sec);
+          }
+        } else if (msg.timerState === 'paused') {
+          const sec = remainingSec ?? presetFallback;
+          if (typeof sec === 'number') {
+            if (rafRef.current) cancelAnimationFrame(rafRef.current);
+            rafRef.current = null;
+            setRunning(false);
+            setEndTimeMs(null);
+            endTimeRef.current = null;
+            setTimerSec(sec);
+            timerSecRef.current = sec;
+            safeSetItem(`timer-${boxId}`, sec.toString());
+            broadcastRemaining(sec);
+          }
+        } else if (msg.timerState === 'idle') {
+          // Don't clobber an active local countdown if we already have one.
+          if (!running) {
+            const sec = remainingSec ?? presetFallback;
+            if (typeof sec === 'number') {
+              setTimerSec(sec);
+              timerSecRef.current = sec;
+              safeSetItem(`timer-${boxId}`, sec.toString());
+              broadcastRemaining(sec);
+            }
+          }
+        }
+
         if (typeof msg.timeCriterionEnabled === 'boolean') {
           setTimeCriterionEnabled(msg.timeCriterionEnabled);
           safeSetItem(`timeCriterionEnabled-${boxId}`, msg.timeCriterionEnabled ? 'on' : 'off');
