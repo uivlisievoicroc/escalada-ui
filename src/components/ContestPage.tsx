@@ -331,12 +331,12 @@ const ContestPage: FC = () => {
         if (+msg.boxId !== Number(boxId)) return;
         // Hydrate ContestPage from authoritative backend state so opening mid-contest
         // doesn't reset the UI to the first competitor from localStorage listboxes.
-        if (msg.sessionId) {
-          safeSetItem(`sessionId-${boxId}`, msg.sessionId);
-        }
-        if (typeof msg.boxVersion === 'number') {
-          safeSetItem(`boxVersion-${boxId}`, msg.boxVersion);
-        }
+	        if (msg.sessionId) {
+	          safeSetItem(`sessionId-${boxId}`, msg.sessionId);
+	        }
+	        if (typeof msg.boxVersion === 'number') {
+	          safeSetItem(`boxVersion-${boxId}`, String(msg.boxVersion));
+	        }
         if (typeof msg.categorie === 'string') {
           setCategory(msg.categorie);
         }
@@ -352,9 +352,9 @@ const ContestPage: FC = () => {
         if (typeof msg.holdCount === 'number') {
           setCurrentHold(msg.holdCount);
         }
-        if (typeof msg.timerPreset === 'string' && msg.timerPreset.trim()) {
-          safeSetItem(`climbingTime-${boxId}`, msg.timerPreset);
-        }
+	        if (typeof msg.timerPreset === 'string' && msg.timerPreset.trim()) {
+	          safeSetItem(`climbingTime-${boxId}`, msg.timerPreset);
+	        }
 
         const competitors = Array.isArray(msg.competitors) ? msg.competitors : [];
         const names = competitors

@@ -84,7 +84,10 @@ export interface StateSnapshot {
   initiated: boolean;
   holdsCount: number;
   routeIndex: number;
+  routesCount?: number;
+  holdsCounts?: number[];
   currentClimber: string;
+  preparingClimber?: string;
   started: boolean;
   timerState: TimerState;
   holdCount: number;
