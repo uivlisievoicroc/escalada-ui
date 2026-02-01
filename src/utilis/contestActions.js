@@ -430,6 +430,43 @@ export async function resetBox(boxId) {
   }
 }
 
+/**
+ * Partial reset for a box (checkbox-driven).
+ * @param {number} boxId - Box identifier
+ * @param {{resetTimer?: boolean, clearProgress?: boolean, unmarkAll?: boolean}} opts
+ * @throws {Error} If API request fails
+ */
+export async function resetBoxPartial(boxId, opts = {}) {
+  const { resetTimer = false, clearProgress = false, unmarkAll = false } = opts || {};
+  try {
+    const response = await fetchWithRetry(
+      API,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          boxId,
+          type: 'RESET_PARTIAL',
+          resetTimer,
+          clearProgress,
+          unmarkAll,
+          sessionId: getSessionId(boxId),
+          boxVersion: getBoxVersion(boxId),
+        }),
+      },
+      3,
+      5000,
+    );
+
+    await validateResponse(response, 'RESET_PARTIAL');
+    return await response.json();
+  } catch (err) {
+    debugError('[resetBoxPartial] Error:', err);
+    throw err;
+  }
+}
+
 // ==================== EXPORTS ====================
 
 export { getSessionId, setSessionId, getBoxVersion };

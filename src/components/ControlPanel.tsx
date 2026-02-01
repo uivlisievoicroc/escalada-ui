@@ -20,6 +20,7 @@ import {
   setSessionId,
   getBoxVersion,
   resetBox,
+  resetBoxPartial,
 } from '../utilis/contestActions';
 import ModalModifyScore from './ModalModifyScore';
 import getWinners from '../utilis/getWinners';
@@ -196,6 +197,14 @@ const ControlPanel: FC = () => {
   const [timerDialogValue, setTimerDialogValue] = useState<string>('');
   const [timerDialogCriterion, setTimerDialogCriterion] = useState<boolean>(false);
   const [timerDialogError, setTimerDialogError] = useState<string | null>(null);
+  const [showResetDialog, setShowResetDialog] = useState<boolean>(false);
+  const [resetDialogBoxId, setResetDialogBoxId] = useState<number | null>(null);
+  const [resetDialogOpts, setResetDialogOpts] = useState<{
+    resetTimer: boolean;
+    clearProgress: boolean;
+    unmarkAll: boolean;
+    closeTab: boolean;
+  }>({ resetTimer: true, clearProgress: true, unmarkAll: true, closeTab: true });
   const [adminActionsView, setAdminActionsView] = useState<AdminActionsView>('upload');
   const [scoringBoxId, setScoringBoxId] = useState<number | null>(null);
   const [judgeAccessBoxId, setJudgeAccessBoxId] = useState<number | null>(null);
@@ -513,6 +522,28 @@ const ControlPanel: FC = () => {
               if (typeof msg.boxVersion === 'number') {
                 safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
               }
+              if (Array.isArray(msg.competitors)) {
+                const incoming: Record<string, boolean> = {};
+                msg.competitors.forEach((c: any) => {
+                  if (!c || typeof c !== 'object') return;
+                  if (typeof c.nume !== 'string') return;
+                  incoming[c.nume] = !!c.marked;
+                });
+                setListboxes((prev) =>
+                  prev.map((lb, i) => {
+                    if (i !== idx) return lb;
+                    if (!Array.isArray(lb.concurenti)) return lb;
+                    return {
+                      ...lb,
+                      concurenti: lb.concurenti.map((c) => {
+                        if (!c || typeof c.nume !== 'string') return c;
+                        if (!(c.nume in incoming)) return c;
+                        return { ...c, marked: incoming[c.nume] };
+                      }),
+                    };
+                  }),
+                );
+              }
               // Ignore stale snapshot values for non‑initiated boxes
               setTimerStates((prev) => ({
                 ...prev,
@@ -786,10 +817,11 @@ const ControlPanel: FC = () => {
   // Format seconds into "mm:ss"
   const formatTime = (sec: number | null | undefined): string => {
     const safeSec = typeof sec === 'number' && !isNaN(sec) ? sec : 0;
-    const m = Math.floor(safeSec / 60)
+    const whole = Math.max(0, Math.ceil(safeSec));
+    const m = Math.floor(whole / 60)
       .toString()
       .padStart(2, '0');
-    const s = (safeSec % 60).toString().padStart(2, '0');
+    const s = (whole % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   };
 
@@ -1261,62 +1293,109 @@ const ControlPanel: FC = () => {
     }
   };
 
-  // Reset listbox to its initial state
-  const handleReset = async (index: number): Promise<void> => {
-    // NEW: Bounds check for box index
-    if (index < 0 || index >= listboxes.length) {
-      debugError(`Invalid box index: ${index}`);
-      alert(`Invalid box index: ${index}`);
-      return;
-    }
-
-    const boxToReset = listboxes[index];
-
-    // ==================== FIX 3: GUARD HOLDSCOUNT ARRAY ====================
-    // Validate that holdsCounts exists and has at least one element before reset
-    if (
-      !boxToReset ||
-      !Array.isArray(boxToReset.holdsCounts) ||
-      boxToReset.holdsCounts.length === 0
-    ) {
-      debugError(`Cannot reset box ${index}: missing or empty holdsCounts array`, boxToReset);
-      return;
-    }
-    // Reset backend state and regenerate sessionId
-    try {
-      await resetBox(index);
-    } catch (err) {
-      debugError(`RESET_BOX failed for box ${index}`, err);
-    }
-
-    setListboxes((prev) =>
-      prev
-        .map((lb, i) => {
-          if (i !== index) return lb;
-          return {
-            ...lb,
-            initiated: false,
-            routeIndex: 1,
-            holdsCount: lb.holdsCounts[0],
-            concurenti: lb.concurenti.map((c) => ({ ...c, marked: false })),
-          };
-        })
-        // caz special: dacă există un listbox “următor” în aceeași categorie, îl eliminăm
-        .filter((lb, i) => i === index || lb.categorie !== listboxes[index].categorie),
+  const confirmDeleteBox = (index: number): boolean => {
+    const box = listboxesRef.current[index];
+    const label = box?.categorie ? `Box ${index} (${box.categorie})` : `Box ${index}`;
+    return window.confirm(
+      `${label}\n\nDelete will permanently remove this box from ControlPanel and reindex all boxes after it.\nThis action cannot be undone.\n\nDelete this box?`,
     );
-    // închide tab-ul dacă era deschis
-    const tab = openTabs[index];
-    if (tab && !tab.closed) tab.close();
-    delete openTabs[index];
-	    // reset local state for holds and timer
-	    setHoldClicks((prev) => ({ ...prev, [index]: 0 }));
-	    setUsedHalfHold((prev) => ({ ...prev, [index]: false }));
-	    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
-	    setTimerSecondsForBox(index, defaultTimerSec(index));
-	    clearRegisteredTime(index);
-	    // reset current climber highlight
-	    setCurrentClimbers((prev) => ({ ...prev, [index]: '' }));
-	  };
+  };
+
+  const openResetDialog = (index: number): void => {
+    setResetDialogBoxId(index);
+    setResetDialogOpts({ resetTimer: false, clearProgress: false, closeTab: false, unmarkAll: false });
+    setShowResetDialog(true);
+  };
+
+  const applyResetDialog = async (): Promise<void> => {
+    if (resetDialogBoxId == null) return;
+    const boxIdx = resetDialogBoxId;
+    const opts = resetDialogOpts;
+
+    if (!opts.resetTimer && !opts.clearProgress && !opts.unmarkAll && !opts.closeTab) {
+      setShowResetDialog(false);
+      return;
+    }
+
+    setLoadingBoxes((prev) => new Set(prev).add(boxIdx));
+
+    // Client-side only (tab management)
+    if (opts.closeTab) {
+      const tab = openTabs[boxIdx];
+      if (tab && !tab.closed) tab.close();
+      delete openTabs[boxIdx];
+    }
+
+    // Optimistic UI (authoritative state still comes from backend snapshot)
+    if (opts.clearProgress) {
+      setHoldClicks((prev) => ({ ...prev, [boxIdx]: 0 }));
+      setUsedHalfHold((prev) => ({ ...prev, [boxIdx]: false }));
+    }
+    if (opts.unmarkAll) {
+      setListboxes((prev) =>
+        prev.map((lb, i) => {
+          if (i !== boxIdx) return lb;
+          return { ...lb, concurenti: lb.concurenti.map((c) => ({ ...c, marked: false })) };
+        }),
+      );
+    }
+    if (opts.resetTimer) {
+      setTimerStates((prev) => ({ ...prev, [boxIdx]: 'idle' }));
+      setTimerSecondsForBox(boxIdx, defaultTimerSec(boxIdx));
+    }
+
+    try {
+      if (opts.resetTimer || opts.clearProgress || opts.unmarkAll) {
+        const result: any = await resetBoxPartial(boxIdx, {
+          resetTimer: opts.resetTimer,
+          clearProgress: opts.clearProgress,
+          unmarkAll: opts.unmarkAll,
+        });
+        if (result?.status === 'ignored') {
+          debugWarn(`RESET_PARTIAL ignored (box ${boxIdx}), resyncing...`);
+          try {
+            const config = getApiConfig();
+            const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+              credentials: 'include',
+            });
+            if (res.status === 401 || res.status === 403) {
+              clearAuth();
+              setAdminRole(null);
+              setShowAdminLogin(true);
+              return;
+            }
+            if (res.ok) {
+              const st = await res.json();
+              if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+              if (typeof st?.boxVersion === 'number')
+                safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+            }
+          } catch (err) {
+            debugError(`Failed to resync state after ignored RESET_PARTIAL for box ${boxIdx}`, err);
+          }
+
+          const retry: any = await resetBoxPartial(boxIdx, {
+            resetTimer: opts.resetTimer,
+            clearProgress: opts.clearProgress,
+            unmarkAll: opts.unmarkAll,
+          });
+          if (retry?.status === 'ignored') {
+            debugWarn(`RESET_PARTIAL still ignored after resync (box ${boxIdx})`);
+          }
+        }
+      }
+      setShowResetDialog(false);
+    } catch (err) {
+      debugError('RESET_PARTIAL failed:', err);
+      alert('Reset failed. Verify API is running and you are logged in as admin.');
+    } finally {
+      setLoadingBoxes((prev) => {
+        const next = new Set(prev);
+        next.delete(boxIdx);
+        return next;
+      });
+    }
+  };
 
     const openClimbingPage = (boxId: number): Window | null => {
       const existingTab = openTabs[boxId];
@@ -1359,6 +1438,11 @@ const ControlPanel: FC = () => {
       );
       // 3. Initialize remaining time for public/live views even if ContestPage isn't open.
       sendTimerSync(index, presetToSeconds(preset));
+  };
+
+  const handleDeleteWithConfirm = async (index: number): Promise<void> => {
+    if (!confirmDeleteBox(index)) return;
+    await handleDelete(index);
   };
 
   // Advance to the next route on demand
@@ -1734,6 +1818,39 @@ const ControlPanel: FC = () => {
     boxIdx: number,
   ): Promise<boolean | void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
+    // Ensure we always submit against an actual competitor name (headless-safe).
+    let competitorName = activeCompetitor || currentClimbersRef.current[boxIdx] || '';
+    if (!competitorName.trim()) {
+      try {
+        const config = getApiConfig();
+        const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+          credentials: 'include',
+        });
+        if (res.status === 401 || res.status === 403) {
+          clearAuth();
+          setAdminRole(null);
+          setShowAdminLogin(true);
+          return false;
+        }
+        if (res.ok) {
+          const st = await res.json();
+          const name = typeof st?.currentClimber === 'string' ? st.currentClimber : '';
+          if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+          if (typeof st?.boxVersion === 'number') safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+          if (name.trim()) {
+            competitorName = name;
+            setCurrentClimbers((prev) => ({ ...prev, [boxIdx]: name }));
+            setActiveCompetitor(name);
+          }
+        }
+      } catch (err) {
+        debugError(`Failed to resolve current climber before SUBMIT_SCORE (box ${boxIdx})`, err);
+      }
+    }
+    if (!competitorName.trim()) {
+      showRankingStatus(boxIdx, 'No active climber for this box. Open ContestPage or re-initiate contest.', 'error');
+      return false;
+    }
     const registeredTime = (() => {
       if (!getTimeCriterionEnabled(boxIdx)) return undefined;
       const fromState = registeredTimes[boxIdx];
@@ -1754,7 +1871,7 @@ const ControlPanel: FC = () => {
       return undefined;
     })();
     try {
-      const result: any = await submitScore(boxIdx, score, activeCompetitor, registeredTime);
+      const result: any = await submitScore(boxIdx, score, competitorName, registeredTime);
       if (result?.status === 'ignored') {
         showRankingStatus(
           boxIdx,
@@ -1789,8 +1906,8 @@ const ControlPanel: FC = () => {
         return false;
       }
 
-      persistRankingEntry(boxIdx, activeCompetitor, score, registeredTime);
-      markCompetitorInListboxes(boxIdx, activeCompetitor);
+      persistRankingEntry(boxIdx, competitorName, score, registeredTime);
+      markCompetitorInListboxes(boxIdx, competitorName);
 	      // Reset UI state for this box
 	      setHoldClicks((prev) => ({ ...prev, [boxIdx]: 0 }));
 	      setUsedHalfHold((prev) => ({ ...prev, [boxIdx]: false }));
@@ -1801,6 +1918,10 @@ const ControlPanel: FC = () => {
 	      setShowScoreModal(false);
 	      setActiveBoxId(null);
 	      clearRegisteredTime(boxIdx);
+    } catch (err) {
+      debugError(`SUBMIT_SCORE failed (box ${boxIdx})`, err);
+      showRankingStatus(boxIdx, 'Submit failed. Verify API is running and you are logged in.', 'error');
+      return false;
     } finally {
       setLoadingBoxes((prev) => {
         const next = new Set(prev);
@@ -2878,6 +2999,108 @@ const ControlPanel: FC = () => {
         </div>
       )}
 
+      {showResetDialog && (
+        <div className={styles.modalOverlay}>
+          <div className={styles.modalCard}>
+            <div className={styles.modalHeader}>
+              <div>
+                <div className={styles.modalTitle}>Reset box</div>
+                <div className={styles.modalSubtitle}>
+                  {resetDialogBoxId != null && listboxes[resetDialogBoxId] ? (
+                    `Category: ${sanitizeBoxName(listboxes[resetDialogBoxId].categorie || `Box ${resetDialogBoxId}`)}`
+                  ) : (
+                    'Select what to reset.'
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className={styles.modalContent}>
+              <div className={styles.modalField}>
+                <label className={styles.modalLabel}>
+                  <input
+                    type="checkbox"
+                    checked={resetDialogOpts.resetTimer}
+                    onChange={(e) =>
+                      setResetDialogOpts((prev) => ({ ...prev, resetTimer: e.target.checked }))
+                    }
+                    style={{ marginRight: '8px' }}
+                  />
+                  Stop/reset timer (keep current climber/progress)
+                </label>
+              </div>
+              <div className={styles.modalField}>
+                <label className={styles.modalLabel}>
+                  <input
+                    type="checkbox"
+                    checked={resetDialogOpts.clearProgress}
+                    onChange={(e) =>
+                      setResetDialogOpts((prev) => ({ ...prev, clearProgress: e.target.checked }))
+                    }
+                    style={{ marginRight: '8px' }}
+                  />
+                  Clear holds progress (+1 / +0.1)
+                </label>
+              </div>
+              <div className={styles.modalField}>
+                <label className={styles.modalLabel}>
+                  <input
+                    type="checkbox"
+                    checked={resetDialogOpts.unmarkAll}
+                    onChange={(e) =>
+                      setResetDialogOpts((prev) => {
+                        const checked = e.target.checked;
+                        // Unmark-all = restart competition, so it implies timer+progress reset.
+                        return checked
+                          ? { ...prev, unmarkAll: true, resetTimer: true, clearProgress: true }
+                          : { ...prev, unmarkAll: false };
+                      })
+                    }
+                    style={{ marginRight: '8px' }}
+                  />
+                  Unmark all competitors (restart from first)
+                </label>
+              </div>
+              <div className={styles.modalField}>
+                <label className={styles.modalLabel}>
+                  <input
+                    type="checkbox"
+                    checked={resetDialogOpts.closeTab}
+                    onChange={(e) =>
+                      setResetDialogOpts((prev) => ({ ...prev, closeTab: e.target.checked }))
+                    }
+                    style={{ marginRight: '8px' }}
+                  />
+                  Close ContestPage tab (if open)
+                </label>
+              </div>
+
+              <div className={styles.modalActions}>
+                <button
+                  className="modern-btn modern-btn-ghost"
+                  onClick={() => setShowResetDialog(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="modern-btn modern-btn-danger"
+                  onClick={() => void applyResetDialog()}
+                  disabled={
+                    !resetDialogOpts.resetTimer &&
+                    !resetDialogOpts.clearProgress &&
+                    !resetDialogOpts.unmarkAll &&
+                    !resetDialogOpts.closeTab
+                  }
+                  type="button"
+                >
+                  Apply reset
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className={styles.boxesGrid}>
 	        {listboxes.map((lb, idx) => {
 	          const timerState = timerStates[idx] || 'idle';
@@ -3073,10 +3296,45 @@ const ControlPanel: FC = () => {
                       setShowScoreModal(true);
                       return;
                     }
-                    // Legacy fallback: if a ContestPage tab is open, it can respond via localStorage.
-                    requestActiveCompetitor(idx);
+                    // Headless-safe fallback: ask backend for the current climber and open modal.
+                    (async () => {
+                      try {
+                        const config = getApiConfig();
+                        const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${idx}`, {
+                          credentials: 'include',
+                        });
+                        if (res.status === 401 || res.status === 403) {
+                          clearAuth();
+                          setAdminRole(null);
+                          setShowAdminLogin(true);
+                          return;
+                        }
+                        if (!res.ok) {
+                          debugWarn(`Failed to fetch state for Insert Score (box ${idx}): HTTP ${res.status}`);
+                          return;
+                        }
+                        const st = await res.json();
+                        const name = typeof st?.currentClimber === 'string' ? st.currentClimber : '';
+                        if (st?.sessionId) setSessionId(idx, st.sessionId);
+                        if (typeof st?.boxVersion === 'number') {
+                          safeSetItem(`boxVersion-${idx}`, String(st.boxVersion));
+                        }
+                        if (name.trim()) {
+                          setCurrentClimbers((prev) => ({ ...prev, [idx]: name }));
+                          setActiveCompetitor(name);
+                          setShowScoreModal(true);
+                          return;
+                        }
+                        // Legacy fallback: if a ContestPage tab is open, it can respond via localStorage.
+                        requestActiveCompetitor(idx);
+                      } catch (err) {
+                        debugError(`Failed to fetch state for Insert Score (box ${idx})`, err);
+                        // Legacy fallback
+                        requestActiveCompetitor(idx);
+                      }
+                    })();
                   }}
-                  disabled={!lb.initiated || !currentClimbers[idx]}
+                  disabled={!lb.initiated}
                 >
                   📊 Insert Score
                 </button>
@@ -3104,13 +3362,13 @@ const ControlPanel: FC = () => {
                 <div className="flex gap-sm">
                   <button
                     className="modern-btn modern-btn-warning hover-lift"
-                    onClick={() => handleReset(idx)}
+                    onClick={() => openResetDialog(idx)}
                   >
                     🔄 Reset
                   </button>
                   <button
                     className="modern-btn modern-btn-danger hover-lift"
-                    onClick={() => handleDelete(idx)}
+                    onClick={() => void handleDeleteWithConfirm(idx)}
                   >
                     🗑️ Delete
                   </button>

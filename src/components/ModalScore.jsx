@@ -47,7 +47,10 @@ const ModalScore = (props) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const numericScore = parseFloat(score);
+    const raw = typeof score === 'string' ? score.trim() : String(score ?? '').trim();
+    // Accept both "." and "," as decimal separators (common in RO locales).
+    const normalized = raw.replace(',', '.');
+    const numericScore = parseFloat(normalized);
     const scaled = Math.round(numericScore * 10);
     // accept values that are integer or end in .1, and <= maxScore
     if (
@@ -100,21 +103,21 @@ const ModalScore = (props) => {
             {submitError}
           </div>
         )}
-        <form onSubmit={handleSubmit} className={styles.modalContent}>
+        <form onSubmit={handleSubmit} className={styles.modalContent} noValidate>
           <div className={styles.modalField}>
             <label className={styles.modalLabel} htmlFor="modal-score-input">
               Score
             </label>
             <input
-              type="number"
-              step="0.1"
+              type="text"
+              inputMode="decimal"
+              placeholder="e.g. 12 or 12.1"
               id="modal-score-input"
               name="score"
               className={styles.modalInput}
               value={score}
               onChange={(e) => setScore(e.target.value)}
               autoFocus
-              required
               disabled={submitPending}
             />
           </div>

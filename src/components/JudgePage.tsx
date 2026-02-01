@@ -80,6 +80,7 @@ const JudgePage: FC = () => {
     return Number.isNaN(parsed) ? null : parsed;
   });
   const [serverTimerPresetSec, setServerTimerPresetSec] = useState<number | null>(null);
+  const timerBaseRef = useRef<{ atMs: number; remaining: number } | null>(null);
 
   // Ref to track snapshot fallback timeout
   const snapshotTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -94,21 +95,21 @@ const JudgePage: FC = () => {
     [setAuthActive, setShowLogin],
   );
 
-  const getTimerPreset = () => {
+  const getTimerPreset = useCallback(() => {
     const specific = safeGetItem(`climbingTime-${idx}`);
     const global = safeGetItem('climbingTime');
     return specific || global || '05:00';
-  };
+  }, [idx]);
   const presetToSec = (preset: string): number => {
     const [m, s] = (preset || '').split(':').map(Number);
     return (m || 0) * 60 + (s || 0);
   };
-  const totalDurationSec = (): number => {
+  const totalDurationSec = useCallback((): number => {
     if (typeof serverTimerPresetSec === 'number' && !Number.isNaN(serverTimerPresetSec)) {
       return serverTimerPresetSec;
     }
     return presetToSec(getTimerPreset());
-  };
+  }, [serverTimerPresetSec, getTimerPreset]);
 
   type TimerPresetCarrier = Pick<StateSnapshot, 'timerPreset' | 'timerPresetSec'> & {
     [key: string]: any;
@@ -168,9 +169,13 @@ const JudgePage: FC = () => {
       }
       if (msg.type === 'TIMER_SYNC') {
         if (+msg.boxId !== idx) return;
+        // With server-side timer enabled, TIMER_SYNC is legacy/best-effort; avoid being misled while running.
+        if (timerBaseRef.current) return;
         if (typeof msg.remaining === 'number') {
-          setTimerSeconds(msg.remaining);
-          safeSetItem(`timer-${idx}`, msg.remaining.toString());
+          const next = Math.max(0, Math.ceil(msg.remaining));
+          timerBaseRef.current = { atMs: Date.now(), remaining: next };
+          setTimerSeconds(next);
+          safeSetItem(`timer-${idx}`, next.toString());
         }
         return;
       }
@@ -264,8 +269,10 @@ const JudgePage: FC = () => {
           }
         }
         if (typeof msg.remaining === 'number') {
-          setTimerSeconds(msg.remaining);
-          safeSetItem(`timer-${idx}`, msg.remaining.toString());
+          const next = Math.max(0, Math.ceil(msg.remaining));
+          timerBaseRef.current = { atMs: Date.now(), remaining: next };
+          setTimerSeconds(next);
+          safeSetItem(`timer-${idx}`, next.toString());
         }
         if (typeof msg.timeCriterionEnabled === 'boolean') {
           setTimeCriterionEnabled(msg.timeCriterionEnabled);
@@ -371,12 +378,46 @@ const JudgePage: FC = () => {
 
   const formatTime = (sec: number | null): string => {
     if (typeof sec !== 'number' || Number.isNaN(sec)) return '—';
-    const m = Math.floor(sec / 60)
+    const whole = Math.max(0, Math.floor(sec));
+    const m = Math.floor(whole / 60)
       .toString()
       .padStart(2, '0');
-    const s = (sec % 60).toString().padStart(2, '0');
+    const s = (whole % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   };
+
+  // Local ticking so Judge sees time flowing between server updates.
+  useEffect(() => {
+    if (timerState !== 'running') {
+      timerBaseRef.current = null;
+      return;
+    }
+
+    // Ensure we have a base even if we only received a START_TIMER event.
+    if (!timerBaseRef.current) {
+      const fallback =
+        typeof timerSeconds === 'number' && Number.isFinite(timerSeconds)
+          ? timerSeconds
+          : parseInt(safeGetItem(`timer-${idx}`) || '', 10);
+      const initial = Number.isFinite(fallback) ? Math.max(0, fallback) : totalDurationSec();
+      timerBaseRef.current = { atMs: Date.now(), remaining: initial };
+      setTimerSeconds(initial);
+      safeSetItem(`timer-${idx}`, initial.toString());
+    }
+
+    const tick = () => {
+      const base = timerBaseRef.current;
+      if (!base) return;
+      const elapsedSec = (Date.now() - base.atMs) / 1000;
+      const next = Math.max(0, Math.ceil(base.remaining - elapsedSec));
+      setTimerSeconds(next);
+      safeSetItem(`timer-${idx}`, next.toString());
+    };
+
+    tick();
+    const interval = setInterval(tick, 250);
+    return () => clearInterval(interval);
+  }, [timerState, timerSeconds, idx, totalDurationSec]);
 
   // ==================== FIX 2: WATCH BOXVERSION CHANGES ====================
   // If reset happens (boxVersion changes) in ControlPanel, refresh Judge state
@@ -566,8 +607,10 @@ const JudgePage: FC = () => {
           setHoldCount(snapshot.holdCount || 0);
         }
         if (typeof snapshot.remaining === 'number') {
-          setTimerSeconds(snapshot.remaining);
-          safeSetItem(`timer-${idx}`, snapshot.remaining.toString());
+          const next = Math.max(0, Math.ceil(snapshot.remaining));
+          timerBaseRef.current = { atMs: Date.now(), remaining: next };
+          setTimerSeconds(next);
+          safeSetItem(`timer-${idx}`, next.toString());
         }
         if (typeof snapshot.registeredTime === 'number') {
           setRegisteredTime(snapshot.registeredTime);
@@ -594,22 +637,70 @@ const JudgePage: FC = () => {
     return Number.isNaN(fallback) ? null : fallback;
   };
 
-  // Handler for Start Time
-  const handleStartTime = () => {
-    startTimer(idx);
-    setTimerState('running');
-    clearRegisteredTime();
+  const runTimerCmd = async (
+    nextState: TimerState,
+    action: 'START_TIMER' | 'STOP_TIMER' | 'RESUME_TIMER',
+  ): Promise<void> => {
+    // Optimistic UI, but verify backend accepted (important for cross-device sync).
+    setTimerState(nextState);
+    if (action !== 'STOP_TIMER') {
+      clearRegisteredTime();
+    }
+    if (action === 'START_TIMER') {
+      const initial = totalDurationSec();
+      timerBaseRef.current = { atMs: Date.now(), remaining: initial };
+      setTimerSeconds(initial);
+      safeSetItem(`timer-${idx}`, initial.toString());
+    }
+    if (action === 'RESUME_TIMER') {
+      const initial =
+        typeof timerSeconds === 'number' && Number.isFinite(timerSeconds)
+          ? Math.max(0, timerSeconds)
+          : totalDurationSec();
+      timerBaseRef.current = { atMs: Date.now(), remaining: initial };
+      setTimerSeconds(initial);
+      safeSetItem(`timer-${idx}`, initial.toString());
+    }
+
+    try {
+      // Ensure we have a fresh sessionId/version (Judge may open mid-contest).
+      if (!getSessionId(idx)) {
+        await pullLatestState();
+      }
+
+      const exec =
+        action === 'START_TIMER' ? startTimer : action === 'STOP_TIMER' ? stopTimer : resumeTimer;
+
+      const result: any = await exec(idx);
+      if (result?.status === 'ignored') {
+        await pullLatestState();
+        const retry: any = await exec(idx);
+        if (retry?.status === 'ignored') {
+          await pullLatestState();
+        }
+      }
+    } catch (err: any) {
+      debugError(`[JudgePage] ${action} failed`, err);
+      if (err?.status === 401 || err?.status === 403) {
+        forceReauth(`${action.toLowerCase()}_${err.status}`);
+        return;
+      }
+      // Re-sync UI state from backend if the command didn't apply.
+      await pullLatestState();
+    }
   };
 
-  const handleStopTime = () => {
-    stopTimer(idx);
-    setTimerState('paused');
+  // Handler for Start/Stop/Resume Time
+  const handleStartTime = async (): Promise<void> => {
+    await runTimerCmd('running', 'START_TIMER');
   };
 
-  const handleResumeTime = () => {
-    resumeTimer(idx);
-    setTimerState('running');
-    clearRegisteredTime();
+  const handleStopTime = async (): Promise<void> => {
+    await runTimerCmd('paused', 'STOP_TIMER');
+  };
+
+  const handleResumeTime = async (): Promise<void> => {
+    await runTimerCmd('running', 'RESUME_TIMER');
   };
 
   // Handler for +1 Hold

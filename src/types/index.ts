@@ -70,6 +70,7 @@ export type CommandType =
   | 'SUBMIT_SCORE'
   | 'REQUEST_STATE'
   | 'RESET_BOX'
+  | 'RESET_PARTIAL'
   | 'REQUEST_ACTIVE_COMPETITOR'
   | 'ACTIVE_CLIMBER'
   | 'SET_TIME_CRITERION'
@@ -129,6 +130,10 @@ export interface ApiCommand {
   type: CommandType;
   sessionId?: string;
   boxVersion?: number;
+  // RESET_PARTIAL fields
+  resetTimer?: boolean;
+  clearProgress?: boolean;
+  unmarkAll?: boolean;
   // INIT_ROUTE fields
   routeIndex?: number;
   holdsCount?: number;

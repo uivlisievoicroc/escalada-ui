@@ -173,4 +173,92 @@ describe('ControlPanel button flows', () => {
 
     expect(await screen.findByLabelText('Score')).toBeInTheDocument();
   });
+
+  it('opens Insert Score modal via backend state when currentClimber is missing', async () => {
+    // mock fetch: /state returns currentClimber so modal can open headlessly
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/api/state/0')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ currentClimber: 'Ion', sessionId: 'sid-0', boxVersion: 1 }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ControlPanel />
+        </MemoryRouter>,
+      );
+    });
+
+    const insertButtons = await screen.findAllByText(/Insert Score/i);
+    expect(insertButtons.length).toBeGreaterThanOrEqual(1);
+
+    await act(async () => {
+      insertButtons[0].click();
+    });
+
+    expect(await screen.findByLabelText('Score')).toBeInTheDocument();
+  });
+
+  it('submits SUBMIT_SCORE using competitor from backend state', async () => {
+    const calls = [];
+    global.fetch = vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init?.body });
+      if (String(url).includes('/api/state/0')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ currentClimber: 'Ion', sessionId: 'sid-0', boxVersion: 1 }),
+        };
+      }
+      // /api/cmd calls
+      return { ok: true, status: 200, json: async () => ({ status: 'ok' }) };
+    });
+
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ControlPanel />
+        </MemoryRouter>,
+      );
+    });
+
+    const insertButtons = await screen.findAllByText(/Insert Score/i);
+    await act(async () => {
+      insertButtons[0].click();
+    });
+    const scoreInput = await screen.findByLabelText('Score');
+    await act(async () => {
+      scoreInput.value = '';
+    });
+    await act(async () => {
+      scoreInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      scoreInput.value = '5';
+      scoreInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    // Confirm deviation dialog (holds counter differs) if prompted.
+    const originalConfirm = window.confirm;
+    window.confirm = () => true;
+    try {
+      const submitButton = await screen.findByText('Submit');
+      await act(async () => {
+        submitButton.click();
+      });
+    } finally {
+      window.confirm = originalConfirm;
+    }
+
+    const cmdCalls = calls.filter((c) => c.url.includes('/api/cmd') && typeof c.body === 'string');
+    const submit = cmdCalls.find((c) => c.body.includes('"type":"SUBMIT_SCORE"'));
+    expect(submit).toBeTruthy();
+    expect(submit.body).toContain('"competitor":"Ion"');
+  });
 });
