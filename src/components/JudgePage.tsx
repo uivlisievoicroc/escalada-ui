@@ -11,7 +11,7 @@ import {
 } from '../utilis/contestActions';
 import useWebSocketWithHeartbeat from '../utilis/useWebSocketWithHeartbeat';
 import { debugLog, debugWarn, debugError } from '../utilis/debug';
-import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
+import { safeSetItem, safeGetItem, safeRemoveItem, safeGetJSON, storageKey } from '../utilis/storage';
 import {
   clearAuth,
   isAuthenticated,
@@ -822,6 +822,7 @@ const JudgePage: FC = () => {
       {showLogin && (
         <LoginOverlay
           defaultUsername={defaultJudgeUsername}
+          title="Autentificare arbitru"
           onSuccess={() => {
             setAuthActive(true);
             setShowLogin(false);

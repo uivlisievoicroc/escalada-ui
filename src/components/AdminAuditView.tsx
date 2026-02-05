@@ -80,6 +80,7 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
     <div className={className}>
       {showLogin && (
         <LoginOverlay
+          title="Autentificare admin"
           onSuccess={() => {
             setToken(getStoredToken());
             setRole(getStoredRole());

@@ -81,18 +81,11 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
       <div className={styles.modalCard}>
         <div className={styles.modalHeader}>
           <div>
-            <div className={styles.modalTitle}>Upload Listbox</div>
+            <div className={styles.modalTitle}>Upload Listbox Category</div>
             <div className={styles.modalSubtitle}>
               Upload an Excel file with competitor data
             </div>
           </div>
-          <button
-            className="modern-btn modern-btn-sm modern-btn-ghost"
-            onClick={onClose}
-            type="button"
-          >
-            Close
-          </button>
         </div>
         <form onSubmit={handleSubmit} className={styles.modalContent}>
           <div className={styles.modalField}>

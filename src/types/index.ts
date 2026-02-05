@@ -100,6 +100,9 @@ export interface StateSnapshot {
   timeCriterionEnabled?: boolean;
   timerPreset?: string | null;
   timerPresetSec?: number | null;
+  judgeChief?: string;
+  competitionDirector?: string;
+  chiefRoutesetter?: string;
   sessionId?: string;
 }
 

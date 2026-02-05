@@ -9,6 +9,7 @@ import { clearAuth } from './auth';
 
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
 const API = `${API_PROTOCOL}://${window.location.hostname}:8000/api/cmd`;
+const ADMIN_API = `${API_PROTOCOL}://${window.location.hostname}:8000/api/admin`;
 
 // ==================== SESSION ID & VERSION HELPERS ====================
 
@@ -212,6 +213,42 @@ export async function updateProgress(boxId, delta = 1) {
     debugError('[updateProgress] Error:', err);
     throw err;
   }
+}
+
+// ==================== COMPETITION OFFICIALS (ADMIN) ====================
+
+export async function getCompetitionOfficials() {
+  const response = await fetchWithRetry(
+    `${ADMIN_API}/competition_officials`,
+    {
+      method: 'GET',
+      credentials: 'include',
+    },
+    3,
+    5000,
+  );
+  await validateResponse(response, 'GET_COMPETITION_OFFICIALS');
+  return await response.json();
+}
+
+export async function setCompetitionOfficials(judgeChief, competitionDirector, chiefRoutesetter) {
+  const response = await fetchWithRetry(
+    `${ADMIN_API}/competition_officials`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        judgeChief: judgeChief ?? '',
+        competitionDirector: competitionDirector ?? '',
+        chiefRoutesetter: chiefRoutesetter ?? '',
+      }),
+    },
+    3,
+    5000,
+  );
+  await validateResponse(response, 'SET_COMPETITION_OFFICIALS');
+  return await response.json();
 }
 
 /**

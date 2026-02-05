@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback, FC } from 'react';
 import { useParams } from 'react-router-dom';
 import { debugLog, debugError, debugWarn } from '../utilis/debug';
-import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
+import { safeSetItem, safeGetItem, safeRemoveItem, safeGetJSON, storageKey } from '../utilis/storage';
 import { sanitizeBoxName, sanitizeCompetitorName, normalizeCompetitorKey } from '../utilis/sanitize';
 import { clearAuth, isAuthenticated, magicLogin } from '../utilis/auth';
 import LoginOverlay from './LoginOverlay';
@@ -446,6 +446,15 @@ const ContestPage: FC = () => {
           setTimeCriterionEnabled(msg.timeCriterionEnabled);
           safeSetItem(`timeCriterionEnabled-${boxId}`, msg.timeCriterionEnabled ? 'on' : 'off');
         }
+        if (typeof (msg as any).judgeChief === 'string') {
+          setJudgeChief((msg as any).judgeChief || '—');
+        }
+        if (typeof (msg as any).competitionDirector === 'string') {
+          setCompetitionDirector((msg as any).competitionDirector || '—');
+        }
+        if (typeof (msg as any).chiefRoutesetter === 'string') {
+          setChiefRoutesetter((msg as any).chiefRoutesetter || '—');
+        }
       }
       if (msg.type === 'SET_TIME_CRITERION') {
         if (+msg.boxId !== Number(boxId)) return;
@@ -691,6 +700,22 @@ const ContestPage: FC = () => {
     setRoutesetterName(readRoutesetterName());
   }, [readRoutesetterName]);
 
+  const readJudgeChief = useCallback(() => safeGetItem('competitionJudgeChief') || '—', []);
+  const readCompetitionDirector = useCallback(
+    () => safeGetItem('competitionDirector') || '—',
+    [],
+  );
+  const readChiefRoutesetter = useCallback(
+    () => safeGetItem('competitionChiefRoutesetter') || '—',
+    [],
+  );
+
+  const [judgeChief, setJudgeChief] = useState<string>(() => readJudgeChief());
+  const [competitionDirector, setCompetitionDirector] = useState<string>(() =>
+    readCompetitionDirector(),
+  );
+  const [chiefRoutesetter, setChiefRoutesetter] = useState<string>(() => readChiefRoutesetter());
+
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (!e.key) return;
@@ -706,10 +731,29 @@ const ContestPage: FC = () => {
       ) {
         setRoutesetterName(readRoutesetterName());
       }
+      if (e.key === storageKey('competitionJudgeChief') || e.key === 'competitionJudgeChief') {
+        setJudgeChief(readJudgeChief());
+      }
+      if (e.key === storageKey('competitionDirector') || e.key === 'competitionDirector') {
+        setCompetitionDirector(readCompetitionDirector());
+      }
+      if (
+        e.key === storageKey('competitionChiefRoutesetter') ||
+        e.key === 'competitionChiefRoutesetter'
+      ) {
+        setChiefRoutesetter(readChiefRoutesetter());
+      }
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
-  }, [boxId, routeIdx, readRoutesetterName]);
+  }, [
+    boxId,
+    routeIdx,
+    readRoutesetterName,
+    readJudgeChief,
+    readCompetitionDirector,
+    readChiefRoutesetter,
+  ]);
 
   const broadcastRemaining = useCallback(
     (remaining: number) => {
@@ -1130,6 +1174,7 @@ const ContestPage: FC = () => {
       {showLogin && (
         <LoginOverlay
           defaultUsername="viewer"
+          title="Autentificare spectator"
           onSuccess={() => {
             setAuthActive(true);
             setShowLogin(false);
@@ -1322,6 +1367,21 @@ const ContestPage: FC = () => {
                 <span className="h-1.5 w-1.5 rounded-full bg-amber-400/60" />
                 <span className="text-white/60">Routesetter:</span>
                 <span className="font-semibold text-white">{routesetterName}</span>
+              </div>
+              <div className="flex items-center gap-2 text-white/80">
+                <span className="h-1.5 w-1.5 rounded-full bg-violet-400/60" />
+                <span className="text-white/60">Chief Routesetter:</span>
+                <span className="font-semibold text-white">{chiefRoutesetter}</span>
+              </div>
+              <div className="flex items-center gap-2 text-white/80">
+                <span className="h-1.5 w-1.5 rounded-full bg-rose-400/60" />
+                <span className="text-white/60">Chief Judge:</span>
+                <span className="font-semibold text-white">{judgeChief}</span>
+              </div>
+              <div className="flex items-center gap-2 text-white/80">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/60" />
+                <span className="text-white/60">Event Director:</span>
+                <span className="font-semibold text-white">{competitionDirector}</span>
               </div>
             </div>
           </div>

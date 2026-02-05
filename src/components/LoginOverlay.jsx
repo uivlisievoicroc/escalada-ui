@@ -3,7 +3,7 @@ import { login } from '../utilis/auth';
 import { debugError } from '../utilis/debug';
 import styles from './ControlPanel.module.css';
 
-const LoginOverlay = ({ onSuccess, defaultUsername = '' }) => {
+const LoginOverlay = ({ onSuccess, defaultUsername = '', title = 'Autentificare' }) => {
   const [username, setUsername] = useState(defaultUsername);
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -40,7 +40,7 @@ const LoginOverlay = ({ onSuccess, defaultUsername = '' }) => {
       <div className={styles.modalCard} role="dialog" aria-modal="true">
         <div className={styles.modalHeader}>
           <div>
-            <div className={styles.modalTitle}>Autentificare arbitru</div>
+            <div className={styles.modalTitle}>{title}</div>
           </div>
         </div>
 

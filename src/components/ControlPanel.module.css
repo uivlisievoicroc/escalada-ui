@@ -192,6 +192,8 @@
 
 .competitorItem.marked {
   text-decoration: line-through;
+  text-decoration-color: #ef4444;
+  text-decoration-thickness: 2px;
   color: var(--text-tertiary);
   opacity: 0.6;
 }

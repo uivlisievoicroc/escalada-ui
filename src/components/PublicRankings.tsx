@@ -38,22 +38,6 @@ type RankInfo = {
   score: number;
 };
 
-const normalizeNumericArray = (
-  arr: Array<number | null | undefined>,
-): Array<number | undefined> =>
-  Array.isArray(arr) ? arr.map((value) => (typeof value === 'number' ? value : undefined)) : [];
-
-const normalizeNumericRecord = (
-  record?: Record<string, Array<number | null | undefined>>,
-): Record<string, Array<number | undefined>> => {
-  if (!record || typeof record !== 'object') return {};
-  const normalized: Record<string, Array<number | undefined>> = {};
-  Object.entries(record).forEach(([key, arr]) => {
-    normalized[key] = normalizeNumericArray(arr);
-  });
-  return normalized;
-};
-
 const calcRankPointsPerRoute = (
   scoresByName: Record<string, Array<number | null | undefined>>,
   nRoutes: number,
@@ -120,9 +104,7 @@ const buildRankingRows = (box: PublicBox): RankingRow[] => {
 
   const baseRows = Object.keys(rankPoints).map((nume) => {
     const rp = rankPoints[nume];
-    const raw = (scores[nume] || []).map((value) =>
-      typeof value === 'number' ? value : undefined,
-    );
+    const raw = (scores[nume] || []).map((value) => (typeof value === 'number' ? value : undefined));
     return {
       rank: 0,
       nume,
@@ -151,7 +133,6 @@ const PublicRankings: FC = () => {
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptsRef = useRef(0);
 
-  // Fetch initial data
   const fetchInitialData = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/rankings`);
@@ -169,7 +150,6 @@ const PublicRankings: FC = () => {
     }
   }, []);
 
-  // WebSocket connection for live updates
   const connectWs = useCallback(async () => {
     try {
       const token = await getSpectatorToken();
@@ -214,8 +194,6 @@ const PublicRankings: FC = () => {
       };
 
       ws.onerror = () => {
-        // Some browsers fire transient WS error events during reconnects.
-        // Avoid flashing an error banner unless we actually give up reconnecting.
         console.warn('Public rankings WS error');
       };
 
@@ -266,7 +244,6 @@ const PublicRankings: FC = () => {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950">
-      {/* Header */}
       <header className="sticky top-0 z-50 bg-slate-900/95 backdrop-blur border-b border-slate-800 p-4">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <button
@@ -288,7 +265,6 @@ const PublicRankings: FC = () => {
         </div>
       </header>
 
-      {/* Category tabs */}
       {initiatedBoxes.length > 0 && (
         <div className="border-b border-slate-800 bg-slate-900/50">
           <div className="max-w-6xl mx-auto px-4 flex gap-2 overflow-x-auto py-2">
@@ -309,14 +285,12 @@ const PublicRankings: FC = () => {
         </div>
       )}
 
-      {/* Error */}
       {error && (
         <div className="bg-red-900/50 border-b border-red-500 p-4 text-center text-red-200">
           {error}
         </div>
       )}
 
-      {/* Main content */}
       <main className="max-w-6xl mx-auto p-6">
         {initiatedBoxes.length === 0 ? (
           <div className="flex flex-col items-center justify-center min-h-[50vh] text-slate-400">

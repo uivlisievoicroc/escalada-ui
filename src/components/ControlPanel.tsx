@@ -2,7 +2,7 @@ import QRCode from 'react-qr-code';
 import React, { useState, useEffect, useRef, Suspense, lazy, FC } from 'react';
 import { debugLog, debugWarn, debugError } from '../utilis/debug';
 import styles from './ControlPanel.module.css';
-import { safeSetItem, safeGetItem, safeRemoveItem, storageKey } from '../utilis/storage';
+import { safeSetItem, safeGetItem, safeRemoveItem, safeGetJSON, safeSetJSON, storageKey } from '../utilis/storage';
 import { normalizeCompetitorKey, sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
 import type { Box, Competitor, WebSocketMessage, TimerState, LoadingBoxes } from '../types';
 import ModalUpload from './ModalUpload';
@@ -21,6 +21,8 @@ import {
   getBoxVersion,
   resetBox,
   resetBoxPartial,
+  getCompetitionOfficials,
+  setCompetitionOfficials,
 } from '../utilis/contestActions';
 import ModalModifyScore from './ModalModifyScore';
 import getWinners from '../utilis/getWinners';
@@ -119,7 +121,7 @@ const readClimbingTime = (): string => {
   const raw = safeGetItem('climbingTime');
   if (!raw) return '05:00';
   try {
-    const v = JSON.parse(raw);
+    const v = safeGetJSON('climbingTime');
     if (typeof v === 'string') return v;
   } catch (err) {
     debugLog('[readClimbingTime] Failed to parse JSON, using fallback regex:', err);
@@ -139,7 +141,8 @@ const parseTimeCriterionValue = (raw: string | null): boolean | null => {
   if (raw === 'off') return false;
   if (!raw) return null;
   try {
-    return !!JSON.parse(raw);
+    const parsed = safeGetJSON('timeCriterionEnabled');
+    return !!parsed;
   } catch {
     return null;
   }
@@ -221,6 +224,9 @@ const ControlPanel: FC = () => {
   const [routesetterNameInput, setRoutesetterNameInput] = useState<string>('');
   const [routesetterNamesTemp, setRoutesetterNamesTemp] = useState<Record<number, string>>({});
   const [routesetterDialogError, setRoutesetterDialogError] = useState<string | null>(null);
+  const [judgeChiefInput, setJudgeChiefInput] = useState<string>('');
+  const [competitionDirectorInput, setCompetitionDirectorInput] = useState<string>('');
+  const [chiefRoutesetterInput, setChiefRoutesetterInput] = useState<string>('');
   const [judgeUsername, setJudgeUsername] = useState<string>('');
   const [judgePassword, setJudgePassword] = useState<string>('');
   const [judgePasswordConfirm, setJudgePasswordConfirm] = useState<string>('');
@@ -236,14 +242,12 @@ const ControlPanel: FC = () => {
     const saved = safeGetItem('listboxes');
     const globalPreset = readClimbingTime();
     if (!saved) return [];
-    try {
-      return JSON.parse(saved).map((lb: Box) => ({
-        ...lb,
-        timerPreset: lb.timerPreset || globalPreset,
-      }));
-    } catch {
-      return [];
-    }
+    const parsed = safeGetJSON('listboxes', []);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((lb: Box) => ({
+      ...lb,
+      timerPreset: lb.timerPreset || globalPreset,
+    }));
   };
   const [listboxes, setListboxes] = useState<Box[]>(loadListboxes);
   const [climbingTime, setClimbingTime] = useState<string>(readClimbingTime);
@@ -432,16 +436,28 @@ const ControlPanel: FC = () => {
           switch (msg.type) {
             case 'START_TIMER':
               setTimerStates((prev) => ({ ...prev, [idx]: 'running' }));
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
+              }
               break;
             case 'STOP_TIMER':
               setTimerStates((prev) => ({ ...prev, [idx]: 'paused' }));
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
+              }
               break;
             case 'RESUME_TIMER':
               setTimerStates((prev) => ({ ...prev, [idx]: 'running' }));
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
+              }
               break;
             case 'TIMER_SYNC':
               if (typeof msg.remaining === 'number') {
                 setControlTimers((prev) => ({ ...prev, [idx]: Number.isFinite(msg.remaining) ? msg.remaining : 0 }));
+              }
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
               }
               // Track external timer sources so we don't compete with ContestPage on another device/tab.
               if (typeof msg.competitor === 'string') {
@@ -460,6 +476,9 @@ const ControlPanel: FC = () => {
                 return { ...prev, [idx]: next };
               });
               setUsedHalfHold((prev) => ({ ...prev, [idx]: msg.delta === 0.1 }));
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
+              }
               break;
 	            case 'SUBMIT_SCORE':
 	              persistRankingEntry(idx, msg.competitor, msg.score, msg.registeredTime);
@@ -469,6 +488,9 @@ const ControlPanel: FC = () => {
 	              setTimerStates((prev) => ({ ...prev, [idx]: 'idle' }));
 	              setTimerSecondsForBox(idx, defaultTimerSec(idx));
 	              clearRegisteredTime(idx);
+	              if (typeof msg.boxVersion === 'number') {
+	                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
+	              }
 	              break;
             case 'REGISTER_TIME':
               if (typeof msg.registeredTime === 'number') {
@@ -484,10 +506,16 @@ const ControlPanel: FC = () => {
                   });
                 }
               }
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
+              }
               break;
             case 'SET_TIME_CRITERION':
               if (typeof msg.timeCriterionEnabled === 'boolean') {
                 syncTimeCriterion(idx, msg.timeCriterionEnabled);
+              }
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
               }
               break;
             case 'REQUEST_STATE':
@@ -630,7 +658,7 @@ const ControlPanel: FC = () => {
 
         ws.onmessage = (ev) => {
           try {
-            const msg = JSON.parse(ev.data);
+            const msg = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
 
             // Handle PING from server
             if (msg.type === 'PING') {
@@ -767,12 +795,8 @@ const ControlPanel: FC = () => {
     const onStorageCmd = (e: StorageEvent) => {
       if (!e.key || !e.newValue) return;
       if (!(e.key === storageKey('timer-cmd') || e.key === 'timer-cmd')) return;
-      try {
-        const cmd = JSON.parse(e.newValue);
-        handleTimerCmd(cmd);
-      } catch (err) {
-        debugError('Failed to parse timer-cmd from storage', err);
-      }
+      const cmd = safeGetJSON('timer-cmd');
+      if (cmd) handleTimerCmd(cmd);
     };
     window.addEventListener('storage', onStorageCmd);
     // BroadcastChannel (preferat)
@@ -794,7 +818,8 @@ const ControlPanel: FC = () => {
       const nsPrefix = storageKey('timer-sync-');
       if (!(e.key.startsWith(nsPrefix) || e.key.startsWith('timer-sync-'))) return;
       try {
-        const { boxId, remaining } = JSON.parse(e.newValue);
+        const data = JSON.parse(e.newValue);
+        const { boxId, remaining } = data || {};
         if (typeof boxId === 'number' && typeof remaining === 'number') {
           setControlTimers((prev) => ({ ...prev, [boxId]: remaining }));
           if (remaining <= 0) {
@@ -1091,11 +1116,9 @@ const ControlPanel: FC = () => {
   useEffect(() => {
     const onListboxChange = (e: StorageEvent) => {
       if (e.key === storageKey('listboxes') || e.key === 'listboxes') {
-        try {
-          const updated: Box[] = JSON.parse(e.newValue || '[]');
+        const updated = safeGetJSON('listboxes', []);
+        if (Array.isArray(updated)) {
           setListboxes(updated);
-        } catch (err) {
-          debugError('Failed to parse listboxes from storage', err);
         }
       }
     };
@@ -1123,14 +1146,10 @@ const ControlPanel: FC = () => {
   useEffect(() => {
     const handleMessage = (e: StorageEvent) => {
       if (e.key === storageKey('climb_response') || e.key === 'climb_response') {
-        try {
-          const parsed: any = JSON.parse(e.newValue ?? 'null');
-          if (parsed.type === 'RESPONSE_ACTIVE_COMPETITOR' && parsed.boxId === activeBoxId) {
-            setActiveCompetitor(parsed.competitor);
-            setShowScoreModal(true);
-          }
-        } catch (error) {
-          debugError('Eroare la parsarea datelor:', error);
+        const parsed = safeGetJSON('climb_response');
+        if (parsed?.type === 'RESPONSE_ACTIVE_COMPETITOR' && parsed.boxId === activeBoxId) {
+          setActiveCompetitor(parsed.competitor);
+          setShowScoreModal(true);
         }
       }
     };
@@ -1776,22 +1795,16 @@ const ControlPanel: FC = () => {
     const routeIdx = (box?.routeIndex || 1) - 1;
     const timeVal =
       typeof registeredTime === 'string' ? parseFloat(registeredTime) : registeredTime;
-    try {
-      const rawScores = safeGetItem(`ranking-${boxIdx}`);
-      const rawTimes = safeGetItem(`rankingTimes-${boxIdx}`);
-      const scores = rawScores ? JSON.parse(rawScores) : {};
-      const times = rawTimes ? JSON.parse(rawTimes) : {};
-      if (!scores[competitor]) scores[competitor] = [];
-      if (!times[competitor]) times[competitor] = [];
-      scores[competitor][routeIdx] = score;
-      if (typeof timeVal === 'number' && !Number.isNaN(timeVal)) {
-        times[competitor][routeIdx] = timeVal;
-      }
-      safeSetItem(`ranking-${boxIdx}`, JSON.stringify(scores));
-      safeSetItem(`rankingTimes-${boxIdx}`, JSON.stringify(times));
-    } catch (err) {
-      debugError('Failed to persist ranking entry', err);
+    const scores = safeGetJSON(`ranking-${boxIdx}`, {});
+    const times = safeGetJSON(`rankingTimes-${boxIdx}`, {});
+    if (!scores[competitor]) scores[competitor] = [];
+    if (!times[competitor]) times[competitor] = [];
+    scores[competitor][routeIdx] = score;
+    if (typeof timeVal === 'number' && !Number.isNaN(timeVal)) {
+      times[competitor][routeIdx] = timeVal;
     }
+    safeSetJSON(`ranking-${boxIdx}`, scores);
+    safeSetJSON(`rankingTimes-${boxIdx}`, times);
   };
 
   const markCompetitorInListboxes = (boxIdx: number, competitor: string): void => {
@@ -1977,14 +1990,8 @@ const ControlPanel: FC = () => {
   const handleGenerateRankings = async (boxIdx: number): Promise<void> => {
     const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
     if (!box) return;
-    let ranking: Record<string, number[]> = {};
-    let rankingTimes: Record<string, (number | null | undefined)[]> = {};
-    try {
-      ranking = JSON.parse(safeGetItem(`ranking-${boxIdx}`) || '{}');
-      rankingTimes = JSON.parse(safeGetItem(`rankingTimes-${boxIdx}`) || '{}');
-    } catch (err) {
-      debugError('Failed to read cached rankings for export', err);
-    }
+    const ranking = safeGetJSON(`ranking-${boxIdx}`, {});
+    const rankingTimes = safeGetJSON(`rankingTimes-${boxIdx}`, {});
     const clubMap: Record<string, string> = {};
     (box.concurenti || []).forEach((c) => {
       clubMap[c.nume] = c.club ?? '';
@@ -2083,9 +2090,28 @@ const ControlPanel: FC = () => {
     setRoutesetterNameInput(tempNames[routeIdx] || '');
     setRoutesetterDialogError(null);
     setShowRoutesetterDialog(true);
+
+    // Load global competition officials (best-effort).
+    setJudgeChiefInput(safeGetItem('competitionJudgeChief') || '');
+    setCompetitionDirectorInput(safeGetItem('competitionDirector') || '');
+    setChiefRoutesetterInput(safeGetItem('competitionChiefRoutesetter') || '');
+    void (async () => {
+      try {
+        const existing = await getCompetitionOfficials();
+        if (existing && typeof existing === 'object') {
+          if (typeof existing.judgeChief === 'string') setJudgeChiefInput(existing.judgeChief);
+          if (typeof existing.competitionDirector === 'string')
+            setCompetitionDirectorInput(existing.competitionDirector);
+          if (typeof existing.chiefRoutesetter === 'string')
+            setChiefRoutesetterInput(existing.chiefRoutesetter);
+        }
+      } catch (err) {
+        debugWarn('Failed to load competition officials', err);
+      }
+    })();
   };
 
-  const saveRoutesetter = (): void => {
+  const saveRoutesetter = async (): Promise<void> => {
     if (routesetterBoxId == null) {
       setRoutesetterDialogError('Select a category.');
       return;
@@ -2098,10 +2124,15 @@ const ControlPanel: FC = () => {
       allNames[routesetterRouteIndex] = currentName;
     }
     
-    // Validate that at least one route has a name
-    const hasAnyName = Object.values(allNames).some(name => name && name.trim());
-    if (!hasAnyName) {
-      setRoutesetterDialogError('At least one routesetter name is required.');
+    const judgeChief = judgeChiefInput.trim();
+    const competitionDirector = competitionDirectorInput.trim();
+    const chiefRoutesetter = chiefRoutesetterInput.trim();
+
+    // Validate: at least something to save (routesetter or officials)
+    const hasAnyName = Object.values(allNames).some((name) => name && name.trim());
+    const hasAnyOfficial = !!judgeChief || !!competitionDirector || !!chiefRoutesetter;
+    if (!hasAnyName && !hasAnyOfficial) {
+      setRoutesetterDialogError('Nothing to save.');
       return;
     }
     
@@ -2118,6 +2149,19 @@ const ControlPanel: FC = () => {
       safeSetItem('routesetterName', currentName);
     }
     
+    // Persist global officials to backend (best-effort; requires admin).
+    if (hasAnyOfficial) {
+      try {
+        await setCompetitionOfficials(judgeChief, competitionDirector, chiefRoutesetter);
+        safeSetItem('competitionJudgeChief', judgeChief);
+        safeSetItem('competitionDirector', competitionDirector);
+        safeSetItem('competitionChiefRoutesetter', chiefRoutesetter);
+      } catch (err) {
+        debugError('Failed to save competition officials', err);
+        alert('Failed to save competition officials. Check admin login/API.');
+      }
+    }
+
     setShowRoutesetterDialog(false);
   };
 
@@ -2369,6 +2413,7 @@ const ControlPanel: FC = () => {
     <div className={styles.container}>
       {showAdminLogin && (
         <LoginOverlay
+          title="Autentificare admin"
           onSuccess={() => {
             setAdminRole(getStoredRole());
             setShowAdminLogin(false);
@@ -2629,7 +2674,7 @@ const ControlPanel: FC = () => {
                             disabled={setupBoxId == null}
                             type="button"
                           >
-                            Set routesetter
+                            Set competition officials
                           </button>
                           </div>
                         </div>
@@ -2850,26 +2895,56 @@ const ControlPanel: FC = () => {
         </div>
       )}
 
-	      {showRoutesetterDialog && (
-	        <div className={styles.modalOverlay}>
-	          <div className={styles.modalCard}>
-	            <div className={styles.modalHeader}>
-	              <div>
-	                <div className={styles.modalTitle}>Set routesetter</div>
-	                <div className={styles.modalSubtitle}>
-	                  {routesetterBoxId != null && listboxes[routesetterBoxId] ? (
-	                    `Category: ${sanitizeBoxName(listboxes[routesetterBoxId].categorie || `Box ${routesetterBoxId}`)}`
-	                  ) : (
-	                    'Set the routesetter name for the selected category.'
-	                  )}
-	                </div>
-	              </div>
-	            </div>
-	            <div className={styles.modalContent}>
-              {routesetterBoxId != null && listboxes[routesetterBoxId]?.routesCount > 1 && (
+		      {showRoutesetterDialog && (
+		        <div className={styles.modalOverlay}>
+		          <div className={styles.modalCard}>
+		            <div className={styles.modalHeader}>
+		              <div>
+		                <div className={styles.modalTitle}>Set competition officials</div>
+		                <div className={styles.modalSubtitle}>
+		                  {routesetterBoxId != null && listboxes[routesetterBoxId] ? (
+		                    `Category: ${sanitizeBoxName(listboxes[routesetterBoxId].categorie || `Box ${routesetterBoxId}`)}`
+		                  ) : (
+		                    'Set routesetters per route and global competition officials.'
+		                  )}
+		                </div>
+		              </div>
+		            </div>
+		            <div className={styles.modalContent}>
                 <div className={styles.modalField}>
-                  <label className={styles.modalLabel}>Route</label>
-                  <select
+                  <label className={styles.modalLabel}>Chief Judge</label>
+                  <input
+                    className={styles.modalInput}
+                    value={judgeChiefInput}
+                    onChange={(e) => setJudgeChiefInput(e.target.value)}
+                    placeholder="e.g. Maria Ionescu"
+                    type="text"
+                  />
+                </div>
+                <div className={styles.modalField}>
+                  <label className={styles.modalLabel}>Event Director</label>
+                  <input
+                    className={styles.modalInput}
+                    value={competitionDirectorInput}
+                    onChange={(e) => setCompetitionDirectorInput(e.target.value)}
+                    placeholder="e.g. Andrei Popescu"
+                    type="text"
+                  />
+                </div>
+                <div className={styles.modalField}>
+                  <label className={styles.modalLabel}>Chief Routesetter</label>
+                  <input
+                    className={styles.modalInput}
+                    value={chiefRoutesetterInput}
+                    onChange={(e) => setChiefRoutesetterInput(e.target.value)}
+                    placeholder="e.g. Elena Ionescu"
+                    type="text"
+                  />
+                </div>
+	              {routesetterBoxId != null && listboxes[routesetterBoxId]?.routesCount > 1 && (
+	                <div className={styles.modalField}>
+	                  <label className={styles.modalLabel}>Route</label>
+	                  <select
                     className={styles.modalSelect}
                     value={routesetterRouteIndex}
                     onChange={(e) => {
@@ -2899,16 +2974,16 @@ const ControlPanel: FC = () => {
                   </select>
                 </div>
               )}
-              <div className={styles.modalField}>
-                <label className={styles.modalLabel}>Routesetter name</label>
-                <input
-                  className={styles.modalInput}
-                  value={routesetterNameInput}
-                  onChange={(e) => setRoutesetterNameInput(e.target.value)}
-                  placeholder="e.g. Alex Popescu"
-                  type="text"
-                />
-              </div>
+	              <div className={styles.modalField}>
+	                <label className={styles.modalLabel}>Routesetter name</label>
+	                <input
+	                  className={styles.modalInput}
+	                  value={routesetterNameInput}
+	                  onChange={(e) => setRoutesetterNameInput(e.target.value)}
+	                  placeholder="e.g. Alex Popescu"
+	                  type="text"
+	                />
+	              </div>
 
               {routesetterDialogError && (
                 <div className={styles.modalAlertError}>
@@ -2924,18 +2999,18 @@ const ControlPanel: FC = () => {
                 >
                   Cancel
                 </button>
-                <button
-                  className="modern-btn modern-btn-primary"
-                  onClick={saveRoutesetter}
-                  type="button"
-                >
-                  Save
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+	                <button
+	                  className="modern-btn modern-btn-primary"
+	                  onClick={saveRoutesetter}
+	                  type="button"
+	                >
+	                  Save
+	                </button>
+	              </div>
+	            </div>
+	          </div>
+	        </div>
+	      )}
 
 	      {showBoxTimerDialog && (
 	        <div className={styles.modalOverlay}>

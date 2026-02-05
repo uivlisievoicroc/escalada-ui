@@ -137,5 +137,44 @@ export const safeRemoveItem = (key) => {
   }
 };
 
+/**
+ * Safely parse JSON from localStorage with error handling
+ * @param {string} key - Storage key
+ * @param {*} defaultValue - Default value if parse fails
+ * @returns {*} - Parsed value or default
+ */
+export const safeGetJSON = (key, defaultValue = null) => {
+  try {
+    const raw = safeGetItem(key);
+    if (!raw) return defaultValue;
+    return JSON.parse(raw);
+  } catch (err) {
+    debugError(`JSON parse error for key "${key}":`, err);
+    // Clear corrupt data
+    try {
+      safeRemoveItem(key);
+      debugWarn(`Removed corrupt localStorage entry: ${key}`);
+    } catch (removeErr) {
+      debugError('Failed to remove corrupt entry:', removeErr);
+    }
+    return defaultValue;
+  }
+};
+
+/**
+ * Safely set JSON to localStorage with error handling
+ * @param {string} key - Storage key
+ * @param {*} value - Value to stringify and store
+ * @returns {boolean} - True if successful, false otherwise
+ */
+export const safeSetJSON = (key, value) => {
+  try {
+    return safeSetItem(key, JSON.stringify(value));
+  } catch (err) {
+    debugError(`JSON stringify error for key "${key}":`, err);
+    return false;
+  }
+};
+
 // Export helper for advanced use cases
 export const storageKey = getKey;

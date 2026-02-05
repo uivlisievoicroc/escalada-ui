@@ -22,6 +22,7 @@ const ThemeDemo = lazy(() => import('./components/ThemeDemo'));
 const PublicHub = lazy(() => import('./components/PublicHub'));
 const PublicLiveClimbing = lazy(() => import('./components/PublicLiveClimbing'));
 const PublicRankings = lazy(() => import('./components/PublicRankings'));
+const PublicOfficials = lazy(() => import('./components/PublicOfficials'));
 
 // Generic fallback for pages without specific skeletons
 const PageLoader: FC = () => (
@@ -96,6 +97,14 @@ const App: FC = () => {
             element={
               <Suspense fallback={<RankingsPageSkeleton />}>
                 <PublicRankings />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/public/officials"
+            element={
+              <Suspense fallback={<PageLoader />}>
+                <PublicOfficials />
               </Suspense>
             }
           />

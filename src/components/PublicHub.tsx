@@ -112,6 +112,10 @@ const PublicHub: FC = () => {
     navigate('/public/rankings');
   };
 
+  const handleCompetitionOfficials = () => {
+    navigate('/public/officials');
+  };
+
   const handleLiveClimbing = () => {
     if (boxes.length === 0) {
       setError("The competition hasn't started yet. Please check back later.");
@@ -212,6 +216,21 @@ const PublicHub: FC = () => {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="w-full max-w-lg mt-6">
+        <button
+          onClick={handleCompetitionOfficials}
+          className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/70 text-white rounded-2xl border border-slate-700 shadow-lg transition-all duration-200"
+        >
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-lg font-semibold">Competition Officials</div>
+              <div className="text-slate-300 mt-1 text-sm">Chief Judge & Event Director</div>
+            </div>
+            <div className="text-2xl">👥</div>
+          </div>
+        </button>
       </div>
 
       {/* Footer */}
