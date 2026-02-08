@@ -347,7 +347,11 @@ const ContestPage: FC = () => {
           setHoldsCount(msg.holdsCount);
         }
         if (Array.isArray(msg.holdsCounts)) {
-          setHoldsCountsAll(msg.holdsCounts.filter((n: any) => typeof n === 'number'));
+          const counts = msg.holdsCounts.filter((n: any) => typeof n === 'number');
+          setHoldsCountsAll(counts);
+          if (counts.length) {
+            setRoutesCount(counts.length);
+          }
         }
         if (typeof msg.holdCount === 'number') {
           setCurrentHold(msg.holdCount);
@@ -680,6 +684,7 @@ const ContestPage: FC = () => {
   const [running, setRunning] = useState<boolean>(false);
   const [category, setCategory] = useState<string>('');
   const [routeIdx, setRouteIdx] = useState<number>(1);
+  const [routesCount, setRoutesCount] = useState<number>(1);
   const [finalized, setFinalized] = useState<boolean>(false);
   const [holdsCount, setHoldsCount] = useState<number>(0);
   const [currentHold, setCurrentHold] = useState<number>(0);
@@ -966,6 +971,11 @@ const ContestPage: FC = () => {
       setRemaining(list.slice(2).map((c: Competitor) => c.nume));
     }
     setRouteIdx(box.routeIndex || 1);
+    const totalRoutes =
+      Array.isArray(box.holdsCounts) && box.holdsCounts.length
+        ? box.holdsCounts.length
+        : Math.max(1, Number(box.routesCount) || 1);
+    setRoutesCount(totalRoutes);
     setHoldsCount(box.holdsCount);
     setHoldsCountsAll(box.holdsCounts);
     setCategory(box.categorie || '');
@@ -1181,25 +1191,14 @@ const ContestPage: FC = () => {
           }}
         />
       )}
-      <div className="h-screen overflow-hidden md:overflow-y-auto bg-gradient-to-br from-[#05060a] via-[#0b1220] to-[#0f172a] text-slate-100 flex flex-col">
-      <header className="max-w-7xl mx-auto px-6 py-2 flex items-center justify-between border-b border-white/10 flex-shrink-0">
-        <div className="space-y-1">
-          <p className="text-xs uppercase tracking-[0.28em] text-cyan-200/80">Contest</p>
-          <h1 className="text-2xl md:text-3xl font-black text-white">{sanitizeBoxName(category)}</h1>
-        </div>
-        <div className="flex items-center gap-3 text-sm">
-          <span className="px-3 py-1 rounded-full bg-cyan-500/15 border border-cyan-300/40 text-cyan-200">
-            T{routeIdx} • {holdsCount || 0} holds
-          </span>
-          {finalized && (
-            <span className="px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-300/40 text-emerald-200">
-              Finalized
-            </span>
-          )}
-        </div>
+      <div className="h-screen overflow-hidden bg-gradient-to-br from-[#05060a] via-[#0b1220] to-[#0f172a] text-slate-100 flex flex-col">
+      <header className="w-full px-6 py-2 flex items-center justify-center border-b border-white/10 flex-shrink-0">
+        <h1 className="text-2xl md:text-3xl font-black text-white text-center">
+          {sanitizeBoxName(category)}
+        </h1>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-3 flex-1 grid gap-4 lg:grid-cols-[1.6fr_1fr] items-start overflow-hidden md:overflow-visible">
+      <main className="w-full px-6 py-3 flex-1 min-h-0 grid grid-rows-1 gap-4 lg:grid-cols-[2.2fr_1fr] overflow-hidden">
         <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur">
           <div
             className="absolute inset-0 opacity-70 bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,0.14),transparent_35%),radial-gradient(circle_at_80%_0%,rgba(14,165,233,0.18),transparent_40%)]"
@@ -1306,49 +1305,54 @@ const ContestPage: FC = () => {
           </div>
         </section>
 
-        <section className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur p-4 flex flex-col gap-4 overflow-y-auto max-h-full">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-xs uppercase tracking-[0.24em] text-cyan-200/80">Preparing</p>
-              <h3 className="text-xl font-bold text-white">On deck</h3>
-            </div>
-            <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs uppercase tracking-[0.2em] text-white/60">
-              Queue
-            </span>
-          </div>
-          <ul className="space-y-3 text-lg">
-            {preparing.length === 0 && (
-              <li className="px-4 py-3 rounded-lg border border-white/5 bg-white/5 text-white/60">No climbers in queue</li>
-            )}
-            {preparing.map((n, i) => (
-              <li
-                key={i}
-                className="px-4 py-3 rounded-lg border border-white/5 bg-white/10 flex items-center justify-between"
-              >
-                <span className="font-semibold text-white">{sanitizeCompetitorName(n)}</span>
-                <span className="text-xs text-white/60 uppercase tracking-[0.2em]">Next</span>
-              </li>
-            ))}
-          </ul>
-
-          {remaining.length > 0 && (
-            <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-white/60 mb-2">Waiting</p>
-              <div className="flex flex-wrap gap-2">
-                {remaining.map((n, idx) => (
-                  <span
-                    key={idx}
-                    className="px-3 py-2 rounded-full border border-white/5 bg-white/5 text-sm text-white/80"
-                  >
-                    {sanitizeCompetitorName(n)}
-                  </span>
-                ))}
+        <section className="h-full max-h-full min-h-0 flex flex-col gap-4">
+          <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur p-4 flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.24em] text-cyan-200/80">Preparing</p>
+                <h3 className="text-xl font-bold text-white">On deck</h3>
               </div>
+              <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs uppercase tracking-[0.2em] text-white/60">
+                Queue
+              </span>
             </div>
-          )}
+            <ul className="space-y-3 text-lg">
+              {preparing.length === 0 && (
+                <li className="px-4 py-3 rounded-lg border border-white/5 bg-white/5 text-white/60">
+                  No climbers in queue
+                </li>
+              )}
+              {preparing.map((n, i) => (
+                <li
+                  key={i}
+                  className="px-4 py-3 rounded-lg border border-white/5 bg-white/10 flex items-center justify-between"
+                >
+                  <span className="font-semibold text-white">{sanitizeCompetitorName(n)}</span>
+                  <span className="text-xs text-white/60 uppercase tracking-[0.2em]">Next</span>
+                </li>
+              ))}
+            </ul>
 
-          {/* Route Info - new section */}
-          <div className="rounded-xl border border-white/10 bg-white/5 backdrop-blur p-4">
+            {remaining.length > 0 && (
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-white/60 mb-2">
+                  Waiting (next two...)
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {remaining.slice(0, 2).map((n, idx) => (
+                    <span
+                      key={idx}
+                      className="px-3 py-2 rounded-full border border-white/5 bg-white/5 text-sm text-white/80"
+                    >
+                      {sanitizeCompetitorName(n)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-auto rounded-2xl border border-white/10 bg-white/5 backdrop-blur p-4">
             <div className="flex items-center justify-between mb-3">
               <p className="text-xs uppercase tracking-[0.24em] text-cyan-200/80">Route Info</p>
             </div>
@@ -1356,7 +1360,9 @@ const ContestPage: FC = () => {
               <div className="flex items-center gap-2 text-white/80">
                 <span className="h-1.5 w-1.5 rounded-full bg-cyan-400/60" />
                 <span className="text-white/60">Route:</span>
-                <span className="font-semibold text-white">{routeIdx}</span>
+                <span className="font-semibold text-white">
+                  {routeIdx}/{Math.max(1, routesCount)}
+                </span>
               </div>
               <div className="flex items-center gap-2 text-white/80">
                 <span className="h-1.5 w-1.5 rounded-full bg-white/30" />

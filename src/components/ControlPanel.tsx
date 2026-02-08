@@ -25,7 +25,6 @@ import {
   setCompetitionOfficials,
 } from '../utilis/contestActions';
 import ModalModifyScore from './ModalModifyScore';
-import getWinners from '../utilis/getWinners';
 import useWebSocketWithHeartbeat from '../utilis/useWebSocketWithHeartbeat';
 import { normalizeStorageValue } from '../utilis/normalizeStorageValue';
 import {
@@ -1503,12 +1502,8 @@ const ControlPanel: FC = () => {
 	    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
 	    setTimerSecondsForBox(index, defaultTimerSec(index));
 	    clearRegisteredTime(index);
-	    try {
-	      safeRemoveItem(`ranking-${index}`);
-	      safeRemoveItem(`rankingTimes-${index}`);
-    } catch (err) {
-      debugError('Failed to clear cached rankings on reset', err);
-    }
+	    // Keep `ranking-*` history across routes so we can compute overall podium
+	    // and generate rankings without requiring ContestPage to be open.
     // Send INIT_ROUTE for the next route
     const updatedBox = listboxes[index];
     const nextRouteIndex = updatedBox.routeIndex + 1;
@@ -2017,24 +2012,175 @@ const ControlPanel: FC = () => {
       showRankingStatus(boxIdx, 'Failed to generate rankings', 'error');
     }
   };
-  const handleCeremony = (category: string): void => {
+  type CeremonyWinner = { name: string; color: string; club?: string };
+
+  const isContestFinalized = (boxIdx: number): boolean => {
+    const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
+    if (!box || !Array.isArray(box.concurenti) || box.concurenti.length === 0) return false;
+    const routeIndex = Number(box.routeIndex) || 1;
+    const routesCount = Number(box.routesCount) || 1;
+    const allMarked = box.concurenti.every((c) => !!c.marked);
+    return routeIndex === routesCount && allMarked;
+  };
+
+  const normalizeCeremonyWinners = (input: unknown): CeremonyWinner[] => {
+    if (!Array.isArray(input)) return [];
+    return input
+      .map((w) => (w && typeof w === 'object' ? (w as any) : null))
+      .filter((w) => w && typeof w.name === 'string' && w.name.trim().length > 0)
+      .map((w) => ({
+        name: String(w.name),
+        color: typeof w.color === 'string' && w.color ? w.color : '#ffffff',
+        club: typeof w.club === 'string' ? w.club : '',
+      }))
+      .slice(0, 3);
+  };
+
+  const calcRankPointsPerRoute = (
+    scoresByName: Record<string, Array<number | undefined>>,
+    nRoutes: number,
+  ): { rankPoints: Record<string, (number | undefined)[]>; nCompetitors: number } => {
+    const rankPoints: Record<string, (number | undefined)[]> = {};
+    let nCompetitors = 0;
+
+    for (let r = 0; r < nRoutes; r++) {
+      const list = Object.entries(scoresByName)
+        .map(([nume, arr]) => {
+          const raw = Array.isArray(arr) && r < arr.length ? arr[r] : undefined;
+          const score = typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
+          return score === undefined ? null : { nume, score };
+        })
+        .filter((x): x is { nume: string; score: number } => !!x);
+
+      list.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
+      });
+
+      let pos = 1;
+      for (let i = 0; i < list.length; ) {
+        const current = list[i];
+        let j = i;
+        while (j < list.length && list[j].score === current.score) j++;
+        const tieCount = j - i;
+        const first = pos;
+        const last = pos + tieCount - 1;
+        const avgRank = (first + last) / 2;
+        for (let k = i; k < j; k++) {
+          const x = list[k];
+          if (!rankPoints[x.nume]) rankPoints[x.nume] = Array(nRoutes).fill(undefined);
+          rankPoints[x.nume][r] = avgRank;
+        }
+        pos += tieCount;
+        i = j;
+      }
+
+      nCompetitors = Math.max(nCompetitors, list.length);
+    }
+
+    return { rankPoints, nCompetitors };
+  };
+
+  const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: number): number => {
+    const filled = arr.map((v) => v ?? nCompetitors + 1);
+    while (filled.length < nRoutes) filled.push(nCompetitors + 1);
+    const prod = filled.reduce((p, x) => p * x, 1);
+    return Number(Math.pow(prod, 1 / nRoutes).toFixed(3));
+  };
+
+  const computeLocalPodiumForBox = (boxIdx: number): CeremonyWinner[] => {
+    const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
+    const nRoutes = Math.max(1, Number(box?.routesCount) || 1);
+    const rawScores = safeGetJSON(`ranking-${boxIdx}`, {});
+    const hasScores =
+      !!rawScores &&
+      typeof rawScores === 'object' &&
+      Object.keys(rawScores as Record<string, unknown>).length > 0;
+
+    if (!hasScores) {
+      const cached = normalizeCeremonyWinners(safeGetJSON(`podium-${boxIdx}`, []));
+      return cached;
+    }
+
+    const scoresByName: Record<string, Array<number | undefined>> = {};
+    for (const [name, arr] of Object.entries(rawScores as Record<string, unknown>)) {
+      if (!name) continue;
+      if (!Array.isArray(arr)) continue;
+      scoresByName[name] = arr.map((v) =>
+        typeof v === 'number' && Number.isFinite(v) ? v : undefined,
+      );
+    }
+
+    const { rankPoints, nCompetitors } = calcRankPointsPerRoute(scoresByName, nRoutes);
+    const rows = Object.keys(rankPoints).map((nume) => {
+      const rp = rankPoints[nume] || [];
+      const total = geomMean(rp, nRoutes, nCompetitors);
+      return { nume, total };
+    });
+
+    rows.sort((a, b) => {
+      if (a.total !== b.total) return a.total - b.total;
+      return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
+    });
+
+    const clubByKey: Record<string, string> = {};
+    (box?.concurenti || []).forEach((c) => {
+      const key = normalizeCompetitorKey(c?.nume);
+      if (!key) return;
+      const club = typeof c?.club === 'string' ? c.club.trim() : '';
+      clubByKey[key] = club;
+    });
+
+    const colors = ['#ffd700', '#c0c0c0', '#cd7f32'];
+    const podium = rows.slice(0, 3).map((c, i) => {
+      const key = normalizeCompetitorKey(c.nume);
+      return {
+        name: c.nume,
+        club: (key && clubByKey[key]) || '',
+        color: colors[i],
+      };
+    });
+    if (podium.length) {
+      try {
+        safeSetItem(`podium-${boxIdx}`, JSON.stringify(podium));
+      } catch {}
+    }
+    return podium;
+  };
+
+  const handleCeremony = (boxId: number, category: string, winners?: CeremonyWinner[]): void => {
     // Open the ceremony window immediately on click
-    const win = window.open('/ceremony.html', '_blank', 'width=1920,height=1080');
+    const url = `/ceremony.html?boxId=${encodeURIComponent(String(boxId))}&cat=${encodeURIComponent(
+      category || '',
+    )}`;
+    const win = window.open(url, '_blank', 'width=1920,height=1080');
     if (!win) {
       alert('The browser blocked the window - please allow pop-ups for this site.');
       return;
     }
 
-    // Fetch podium from backend
-    getWinners(category)
-      .then((winners) => {
-        (win as any).ceremonyWinners = winners;
-      })
-      .catch((err) => {
-        debugError('Error fetching podium:', err);
-        alert('Unable to fetch podium data from the server.');
-        win.close();
-      });
+    const resolved = normalizeCeremonyWinners(winners);
+    const toSend = resolved.length ? resolved : computeLocalPodiumForBox(boxId);
+    if (!toSend.length) {
+      // Ceremony page will display "No podium data available."
+      return;
+    }
+
+    (win as any).ceremonyWinners = toSend;
+    try {
+      win.postMessage({ type: 'CEREMONY_WINNERS', winners: toSend }, window.location.origin);
+      // Retry a couple of times in case the ceremony page hasn't attached its listener yet.
+      setTimeout(() => {
+        try {
+          win.postMessage({ type: 'CEREMONY_WINNERS', winners: toSend }, window.location.origin);
+        } catch {}
+      }, 250);
+      setTimeout(() => {
+        try {
+          win.postMessage({ type: 'CEREMONY_WINNERS', winners: toSend }, window.location.origin);
+        } catch {}
+      }, 1000);
+    } catch {}
   };
 
   const openQrDialog = (boxIdx: number): void => {
@@ -2240,7 +2386,21 @@ const ControlPanel: FC = () => {
     if (scoringBoxId == null) return;
     const box = listboxes[scoringBoxId];
     if (!box) return;
-    handleCeremony(sanitizeBoxName(box.categorie || `Box ${scoringBoxId}`));
+    if (!isContestFinalized(scoringBoxId)) {
+      alert(
+        'Contest is still running for this category. Winners are not finalized yet.\n\nFinish the last route and make sure all competitors are scored/marked, then try again.',
+      );
+      return;
+    }
+    const category = sanitizeBoxName(box.categorie || `Box ${scoringBoxId}`);
+    const localPodium = computeLocalPodiumForBox(scoringBoxId);
+    if (!localPodium.length) {
+      alert(
+        'Winners are not available yet for this category.\n\nPlease make sure all scores are submitted for all routes, then try again.',
+      );
+      return;
+    }
+    handleCeremony(scoringBoxId, category, localPodium);
   };
 
   const handleCopyQrUrl = async (): Promise<void> => {
@@ -3328,16 +3488,18 @@ const ControlPanel: FC = () => {
                         Number(holdClicks[idx] ?? 0) >= Number(lb.holdsCount ?? 0)
                           ? 'Top reached! Climber cannot climb over the top :)'
                           : 'Add 1 hold'
-                      }
-                    >
-                      <div className="flex flex-col items-center">
-                        <span className="text-xs font-medium text-accent">{currentClimbers[idx] || ''}</span>
-                        <span className="text-lg font-bold">+1 Hold</span>
-                        <span className="text-xs text-secondary">
-                          {holdClicks[idx] || 0} → {lb.holdsCount}
-                        </span>
-                      </div>
-                    </button>
+	                      }
+	                    >
+	                      <div className="flex flex-col items-center">
+	                        <span className="text-xs font-medium text-[#010111]">
+	                          {currentClimbers[idx] || ''}
+	                        </span>
+	                        <span className="text-lg font-bold">+1 Hold</span>
+	                        <span className="text-xs font-semibold text-[#0b1220]">
+	                          {holdClicks[idx] || 0} → {lb.holdsCount}
+	                        </span>
+	                      </div>
+	                    </button>
                     <button
                       className="modern-btn modern-btn-secondary btn-press-effect"
                       style={{ minWidth: '60px' }}

@@ -4,68 +4,616 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Award Ceremony</title>
-<link rel="preconnect" href="https://fonts.gstatic.com" />
-<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap" rel="stylesheet" />
 <style>
-html,body{margin:0;height:100%;overflow:hidden;background:#111;color:#fff;font-family:'Bebas Neue',sans-serif}
-#podium{position:absolute;bottom:10%;left:50%;transform:translateX(-50%);display:flex;gap:3vw}
-.spot{width:12vw;height:18vh;border-radius:4px;filter:brightness(.9)}
-#place3{background:#cd7f32;height:12vh}
-#place2{background:#c0c0c0;height:15vh}
-#place1{background:#ffd700;height:18vh}
-#bigName{position:absolute;top:40%;left:50%;transform:translate(-50%,-50%) scale(0);font-size:9vw;white-space:nowrap}
-.hidden{display:none}
+  :root{
+    --bg0:#070a11;
+    --bg1:#0b1220;
+    --text:#ffffff;
+    --muted:rgba(255,255,255,.68);
+    --card:rgba(255,255,255,.06);
+    --border:rgba(255,255,255,.12);
+  }
+  html,body{
+    margin:0;
+    height:100%;
+    overflow:hidden;
+    background:
+      radial-gradient(1200px 700px at 50% -10%, rgba(34,211,238,.18), transparent 60%),
+      radial-gradient(900px 600px at 20% 20%, rgba(59,130,246,.16), transparent 60%),
+      linear-gradient(180deg, var(--bg0), var(--bg1));
+    color:var(--text);
+    font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  }
+  #header{
+    position:fixed;
+    top:0;
+    left:0;
+    right:0;
+    z-index:10;
+    padding:26px 24px 16px;
+    background:linear-gradient(180deg, rgba(0,0,0,.35), rgba(0,0,0,0));
+    text-align:center;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+  }
+  #title{
+    font-size:clamp(36px, 4.6vw, 84px);
+    font-weight:800;
+    letter-spacing:.04em;
+  }
+  #category{
+    margin-top:6px;
+    font-size:clamp(18px, 2.2vw, 36px);
+    font-weight:700;
+    color:var(--muted);
+  }
+  #status{
+    position:fixed;
+    top:18px;
+    right:24px;
+    z-index:11;
+    padding:8px 12px;
+    border-radius:999px;
+    background:var(--card);
+    border:1px solid var(--border);
+    color:var(--muted);
+    font-size:12px;
+    letter-spacing:.03em;
+    backdrop-filter: blur(10px);
+  }
+  #status.hidden{opacity:0; visibility:hidden;}
+
+  #confetti{
+    position:fixed;
+    inset:0;
+    z-index:6;
+    pointer-events:none;
+  }
+
+  #podium{
+    position:absolute;
+    top:50%;
+    left:50%;
+    transform:translate(-50%,-50%);
+    display:flex;
+    gap:clamp(12px, 3vw, 64px);
+    align-items:flex-end;
+    z-index:5;
+  }
+  .spot{
+    position:relative;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:clamp(110px, 29vw, 750px);
+    height:18vh;
+    border-radius:10px;
+    filter:brightness(.92);
+    box-shadow: 0 18px 60px rgba(0,0,0,.35);
+    border:1px solid rgba(255,255,255,.16);
+    transition: filter 220ms ease;
+  }
+  .spot.filled{filter:brightness(1.05);}
+  .spotText{
+    max-width:100%;
+    padding:18px 18px;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    gap:10px;
+    opacity:0;
+    transform:translateY(8px);
+    transition: opacity 320ms ease, transform 320ms ease;
+    user-select:none;
+    pointer-events:none;
+  }
+  .spotName{
+    max-width:100%;
+    font-weight:900;
+    letter-spacing:.02em;
+    font-size:clamp(23px, 3.25vw, 55px);
+    line-height:1.08;
+    color:rgba(255,255,255,.98);
+    text-shadow:
+      0 2px 18px rgba(0,0,0,.45),
+      0 1px 0 rgba(0,0,0,.28);
+    overflow-wrap:anywhere;
+  }
+  .spotClub{
+    max-width:100%;
+    font-weight:800;
+    letter-spacing:.02em;
+    font-size:clamp(14px, 2vw, 30px);
+    line-height:1.1;
+    color:rgba(0,0,0,.66);
+    text-shadow:0 1px 0 rgba(255,255,255,.22);
+    overflow-wrap:anywhere;
+  }
+  .spot.filled .spotText{
+    opacity:1;
+    transform:translateY(0);
+  }
+  .spot::after{
+    content:attr(data-place);
+    position:absolute;
+    left:50%;
+    bottom:clamp(-205px, -15vh, -155px);
+    transform:translateX(-50%);
+    padding:14px 24px;
+    border-radius:999px;
+    background:rgba(255,255,255,.08);
+    border:1px solid rgba(255,255,255,.16);
+    color:rgba(255,255,255,.9);
+    font-weight:900;
+    letter-spacing:.06em;
+    font-size:clamp(44px, 5.6vw, 72px);
+    text-transform:uppercase;
+    backdrop-filter: blur(10px);
+    user-select:none;
+    pointer-events:none;
+    white-space:nowrap;
+    min-width:clamp(84px, 10.5vw, 140px);
+    text-align:center;
+    box-shadow: 0 10px 28px rgba(0,0,0,.25);
+  }
+  #place3{background:#cd7f32;height:29vh}
+  #place2{background:#c0c0c0;height:36vh}
+  #place1{background:#ffd700;height:45vh}
+
+  #bigName{
+    position:absolute;
+    top:40%;
+    left:50%;
+    transform:translate(-50%,-50%) scale(0);
+    opacity:0;
+    visibility:hidden;
+    max-width:min(92vw, 1500px);
+    padding:0 4vw;
+    text-align:center;
+    font-weight:900;
+    letter-spacing:.03em;
+    font-size:clamp(40px, 9vw, 170px);
+    text-shadow:
+      0 2px 14px rgba(0,0,0,.45),
+      0 0 28px rgba(0,0,0,.35);
+    will-change: transform, opacity;
+    transition:
+      transform 600ms cubic-bezier(.2,1.2,.2,1),
+      opacity 250ms ease,
+      visibility 0ms linear 250ms;
+    z-index:7;
+  }
+  #bigName.visible{
+    opacity:1;
+    visibility:visible;
+    transform:translate(-50%,-50%) scale(1.6);
+    transition:
+      transform 600ms cubic-bezier(.2,1.2,.2,1),
+      opacity 250ms ease,
+      visibility 0ms;
+  }
+  #bigName.move{
+    transform:translate(-50%,-50%) translate(var(--tx), var(--ty)) scale(.74);
+    transition:
+      transform 700ms cubic-bezier(.2,1.2,.2,1),
+      opacity 250ms ease,
+      visibility 0ms;
+  }
+  #bigName.out{
+    transform:translate(-50%,-50%) translate(var(--tx), var(--ty)) scale(.32);
+    transition:
+      transform 260ms cubic-bezier(.2,1.2,.2,1),
+      opacity 260ms ease,
+      visibility 0ms;
+  }
+  #bigNameText{
+    display:inline-block;
+    max-width:100%;
+    overflow-wrap:anywhere;
+    word-break:break-word;
+    line-height:0.98;
+  }
+  #bigName.pulse #bigNameText{
+    animation:pulse 420ms ease-in-out infinite alternate;
+  }
+  @keyframes pulse{
+    from{transform:scale(1);}
+    to{transform:scale(1.08);}
+  }
 </style>
 </head>
 <body>
-  <div id="podium">
-    <div id="place3" class="spot"></div>
-    <div id="place2" class="spot"></div>
-    <div id="place1" class="spot"></div>
+  <div id="header">
+    <div id="title">Award Ceremony</div>
+    <div id="category"></div>
   </div>
-  <div id="bigName" class="hidden"></div>
+  <div id="status" role="status">Waiting for podium data…</div>
+  <canvas id="confetti" aria-hidden="true"></canvas>
+  <div id="podium">
+    <div id="place2" class="spot" data-place="II">
+      <div class="spotText" aria-label="Second place">
+        <div class="spotName"></div>
+        <div class="spotClub"></div>
+      </div>
+    </div>
+    <div id="place1" class="spot" data-place="I">
+      <div class="spotText" aria-label="First place">
+        <div class="spotName"></div>
+        <div class="spotClub"></div>
+      </div>
+    </div>
+    <div id="place3" class="spot" data-place="III">
+      <div class="spotText" aria-label="Third place">
+        <div class="spotName"></div>
+        <div class="spotClub"></div>
+      </div>
+    </div>
+  </div>
+  <div id="bigName">
+    <span id="bigNameText"></span>
+  </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/gsap@3"></script>
-  <script type="module">
-    /* 1. Primește lista de câștigători de la fereastra-mamă */
-    let winners = window.opener?.ceremonyWinners || [];
-    if (!winners.length) {
-      /* fallback – poți trimite și prin postMessage dacă vrei */
-      window.addEventListener('message', e => {
-        if (e.data?.winners) { winners = e.data.winners; init(); }
-      });
-    } else {
-      init();
-    }
+  <script>
+    const statusEl = document.getElementById('status');
+    const categoryEl = document.getElementById('category');
+    const nameEl = document.getElementById('bigName');
+    const nameTextEl = document.getElementById('bigNameText');
+    const confettiCanvas = document.getElementById('confetti');
+    const confettiCtx = confettiCanvas ? confettiCanvas.getContext('2d') : null;
 
-    function init() {
-      let step = 0;
-      const nameEl = document.getElementById('bigName');
-      document.addEventListener('keydown', e => e.code === 'Space' && playNext());
-      playNext(); // rulează automat locul 3
+    const params = new URLSearchParams(window.location.search || '');
+    const boxId = params.get('boxId');
+    const cat = params.get('cat') || params.get('category') || '';
+    categoryEl.textContent = cat ? `Category: ${cat}` : '';
 
-      function playNext() {
-        if (step >= winners.length) return;
-        const w = winners[step++];
-        const spot = document.querySelector(`#place${3-step+1}`);
-        nameEl.textContent = w.name;
-        nameEl.style.color = w.color;
-        nameEl.classList.remove('hidden');
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-        const tl = gsap.timeline();
-        tl.set(nameEl, {scale:0, xPercent:-50, yPercent:-50})
-          .to(nameEl, {scale:1.6, duration:0.6, ease:'back.out(1.6)'})
-          .to(nameEl, {scale:1.9, repeat:4, yoyo:true, duration:0.4}, '<')
-          .to({}, {duration:5}) // pauză 5 s
-          .to(nameEl, {scale:0.3, duration:0.6, ease:'back.in(1.4)'})
-          .to(nameEl, {
-              x:spot.getBoundingClientRect().left - window.innerWidth/2 + spot.offsetWidth/2,
-              y:spot.getBoundingClientRect().top  - window.innerHeight/2 + spot.offsetHeight/2,
-              duration:0.6
-            }, '<')
-          .add(()=>nameEl.classList.add('hidden'));
+    // ===== Confetti (offline, no deps) =====
+    let confettiRaf = null;
+    let confettiParticles = [];
+    let confettiStopAt = 0;
+    let confettiDpr = 1;
+    let confettiLastT = 0;
+
+    const CONFETTI_COLORS = [
+      '#fbbf24', // amber
+      '#60a5fa', // blue
+      '#34d399', // emerald
+      '#f472b6', // pink
+      '#a78bfa', // violet
+      '#f87171', // red
+      '#f97316', // orange
+      '#22d3ee', // cyan
+    ];
+
+    const resizeConfetti = () => {
+      if (!confettiCanvas || !confettiCtx) return;
+      confettiDpr = Math.min(2, window.devicePixelRatio || 1);
+      confettiCanvas.width = Math.floor(window.innerWidth * confettiDpr);
+      confettiCanvas.height = Math.floor(window.innerHeight * confettiDpr);
+      confettiCanvas.style.width = `${window.innerWidth}px`;
+      confettiCanvas.style.height = `${window.innerHeight}px`;
+      confettiCtx.setTransform(confettiDpr, 0, 0, confettiDpr, 0, 0);
+    };
+
+    const spawnConfetti = (count, originX, originY, opts = {}) => {
+      const glitter = !!opts.glitter;
+      const sizeMult = 2; // requested: bigger confetti
+      for (let i = 0; i < count; i++) {
+        const size = (glitter ? 2 + Math.random() * 5 : 6 + Math.random() * 12) * sizeMult;
+        const angle = Math.random() * Math.PI * 2;
+        const speed = glitter ? 160 + Math.random() * 640 : 220 + Math.random() * 820;
+        confettiParticles.push({
+          x: originX + (Math.random() - 0.5) * (glitter ? 80 : 140),
+          y: originY + (Math.random() - 0.5) * (glitter ? 80 : 140),
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          g: glitter ? 220 + Math.random() * 320 : 520 + Math.random() * 520,
+          w: size,
+          h: glitter ? size : size * (0.5 + Math.random() * 0.9),
+          rot: Math.random() * Math.PI,
+          vr: (Math.random() - 0.5) * (glitter ? 18 : 12),
+          color: glitter
+            ? '#ffffff'
+            : CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)],
+          alpha: glitter ? 0.95 : 0.9,
+          life: 1,
+          glitter,
+          shine: Math.random() * Math.PI * 2,
+          shineSpeed: (glitter ? 10 : 6) + Math.random() * (glitter ? 10 : 8),
+        });
       }
-    }
+    };
+
+    const stopConfetti = () => {
+      if (confettiRaf != null) cancelAnimationFrame(confettiRaf);
+      confettiRaf = null;
+      confettiParticles = [];
+      if (confettiCtx) {
+        confettiCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      }
+    };
+
+    const tickConfetti = (t) => {
+      if (!confettiCtx) return;
+      if (!confettiLastT) confettiLastT = t;
+      const dt = Math.min(0.033, Math.max(0.008, (t - confettiLastT) / 1000));
+      confettiLastT = t;
+
+      confettiCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+
+      const now = Date.now();
+
+      const next = [];
+      for (const p of confettiParticles) {
+        p.vy += p.g * dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.rot += p.vr * dt;
+        p.vx *= p.glitter ? 0.992 : 0.995;
+        p.life -= dt * (p.glitter ? 0.28 : 0.22);
+        p.shine += p.shineSpeed * dt;
+        if (p.life <= 0) continue;
+        if (p.y > window.innerHeight + 80) continue;
+        if (p.x < -120 || p.x > window.innerWidth + 120) continue;
+
+        const baseAlpha = Math.max(0, Math.min(1, p.alpha * p.life));
+        const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(p.shine));
+
+        confettiCtx.save();
+        confettiCtx.translate(p.x, p.y);
+        confettiCtx.rotate(p.rot);
+
+        confettiCtx.globalCompositeOperation = p.glitter ? 'lighter' : 'source-over';
+        confettiCtx.globalAlpha = baseAlpha;
+        confettiCtx.fillStyle = p.color;
+        confettiCtx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+
+        // Sparkle highlight (glittery look)
+        confettiCtx.globalCompositeOperation = 'lighter';
+        confettiCtx.globalAlpha = baseAlpha * (p.glitter ? 0.9 : 0.55) * twinkle;
+        confettiCtx.fillStyle = 'rgba(255,255,255,0.95)';
+        const s = p.glitter ? 1.15 : 0.62;
+        confettiCtx.fillRect(-p.w * 0.14 * s, -p.h * 0.48 * s, p.w * 0.28 * s, p.h * 0.96 * s);
+        confettiCtx.fillRect(-p.w * 0.48 * s, -p.h * 0.14 * s, p.w * 0.96 * s, p.h * 0.28 * s);
+        confettiCtx.restore();
+
+        next.push(p);
+      }
+      confettiParticles = next;
+
+      const shouldContinue = now < confettiStopAt && confettiParticles.length > 0;
+      if (shouldContinue) {
+        confettiRaf = requestAnimationFrame(tickConfetti);
+      } else {
+        stopConfetti();
+      }
+    };
+
+    const startConfetti = (durationMs = 2600) => {
+      if (!confettiCanvas || !confettiCtx) return;
+      resizeConfetti();
+      const now = Date.now();
+      confettiStopAt = now + durationMs + 1600;
+      confettiLastT = 0;
+      // Explosion from center (place 1 only triggers startConfetti)
+      const originX = window.innerWidth / 2;
+      const originY = window.innerHeight / 2;
+      spawnConfetti(260, originX, originY);
+      spawnConfetti(180, originX, originY, { glitter: true });
+      if (confettiRaf == null) confettiRaf = requestAnimationFrame(tickConfetti);
+    };
+
+    window.addEventListener('resize', resizeConfetti);
+    resizeConfetti();
+
+    const normalizeWinners = (input) => {
+      if (!Array.isArray(input)) return [];
+      return input
+        .filter((w) => w && typeof w.name === 'string')
+        .map((w) => ({
+          name: w.name,
+          club: typeof w.club === 'string' ? w.club : '',
+          color: typeof w.color === 'string' ? w.color : '#ffffff',
+        }))
+        .slice(0, 3);
+    };
+
+    const readLocalPodium = (id) => {
+      if (!id) return [];
+      const keys = [`escalada_podium-${id}`, `podium-${id}`];
+      for (const key of keys) {
+        try {
+          const raw = localStorage.getItem(key);
+          if (!raw) continue;
+          const parsed = JSON.parse(raw);
+          const normalized = normalizeWinners(parsed);
+          if (normalized.length) return normalized;
+        } catch {}
+      }
+      return [];
+    };
+
+    const buildSequence = (winners) => {
+      const list = normalizeWinners(winners);
+      if (list.length >= 3) {
+        return [
+          { winner: list[2], placeId: 'place3', label: '3rd place' },
+          { winner: list[1], placeId: 'place2', label: '2nd place' },
+          { winner: list[0], placeId: 'place1', label: '1st place' },
+        ];
+      }
+      if (list.length === 2) {
+        return [
+          { winner: list[1], placeId: 'place2', label: '2nd place' },
+          { winner: list[0], placeId: 'place1', label: '1st place' },
+        ];
+      }
+      if (list.length === 1) {
+        return [{ winner: list[0], placeId: 'place1', label: '1st place' }];
+      }
+      return [];
+    };
+
+    let sequence = [];
+    let step = 0;
+    let animating = false;
+
+    const resetVisuals = () => {
+      document.querySelectorAll('.spot').forEach((el) => el.classList.remove('filled'));
+      document.querySelectorAll('.spotName').forEach((el) => (el.textContent = ''));
+      document.querySelectorAll('.spotClub').forEach((el) => (el.textContent = ''));
+      nameEl.classList.remove('visible', 'pulse', 'move', 'out');
+      nameEl.style.removeProperty('--tx');
+      nameEl.style.removeProperty('--ty');
+      stopConfetti();
+    };
+
+    const setWinners = (incoming, sourceLabel) => {
+      sequence = buildSequence(incoming);
+      step = 0;
+      resetVisuals();
+
+      if (!sequence.length) {
+        statusEl.classList.remove('hidden');
+        statusEl.textContent = 'No podium data available.';
+        return;
+      }
+
+      statusEl.classList.remove('hidden');
+      statusEl.textContent = `Ready (${sourceLabel}).`;
+    };
+
+    const revealNext = async () => {
+      if (!sequence.length) return;
+      if (animating) return;
+      if (step >= sequence.length) {
+        statusEl.textContent = '';
+        statusEl.classList.add('hidden');
+        return;
+      }
+
+      animating = true;
+      const entry = sequence[step++];
+      const spot = document.getElementById(entry.placeId);
+      statusEl.classList.remove('hidden');
+      statusEl.textContent = entry.label;
+
+      // Set name
+      nameTextEl.textContent = entry.winner.name;
+      nameEl.style.color = entry.winner.color;
+
+      // Reset & show at center
+      nameEl.classList.remove('move', 'out');
+      nameEl.classList.add('visible');
+      nameEl.style.setProperty('--tx', '0px');
+      nameEl.style.setProperty('--ty', '0px');
+      nameEl.classList.add('pulse');
+      if (entry.placeId === 'place1') {
+        startConfetti(3200);
+      }
+
+      // Hold/pulse a bit
+      await wait(3200);
+      nameEl.classList.remove('pulse');
+
+      // Compute translation from viewport center to spot center
+      const spotRect = spot.getBoundingClientRect();
+      const fromRect = nameEl.getBoundingClientRect();
+      const fromX = fromRect.left + fromRect.width / 2;
+      const fromY = fromRect.top + fromRect.height / 2;
+      const targetX = spotRect.left + spotRect.width / 2;
+      const targetY = spotRect.top + spotRect.height / 2;
+      const dx = Math.round(targetX - fromX);
+      const dy = Math.round(targetY - fromY);
+      nameEl.style.setProperty('--tx', `${dx}px`);
+      nameEl.style.setProperty('--ty', `${dy}px`);
+      nameEl.classList.add('move');
+
+      // Let the move animation finish
+      await wait(760);
+      const spotNameEl = spot.querySelector('.spotName');
+      if (spotNameEl) {
+        spotNameEl.textContent = entry.winner.name;
+      }
+      const spotClubEl = spot.querySelector('.spotClub');
+      if (spotClubEl) {
+        spotClubEl.textContent = entry.winner.club || '';
+      }
+      spot.classList.add('filled');
+
+      // Hide
+      nameEl.classList.add('out');
+      await wait(280);
+      nameEl.classList.remove('visible', 'move', 'out');
+
+      animating = false;
+      if (step >= sequence.length) {
+        statusEl.textContent = '';
+        statusEl.classList.add('hidden');
+      }
+    };
+
+    // Prefer postMessage from ControlPanel.
+    window.addEventListener('message', (e) => {
+      try {
+        const sameOrigin = window.location.origin === 'null' || e.origin === window.location.origin;
+        if (!sameOrigin) return;
+      } catch {}
+
+      const data = e.data || {};
+      if (data.type === 'CEREMONY_WINNERS') {
+        setWinners(data.winners, 'postMessage');
+      }
+    });
+
+    // Manual control: Space key.
+    document.addEventListener('keydown', (e) => {
+      if (e.code !== 'Space') return;
+      e.preventDefault();
+      void revealNext();
+    });
+
+    // Bootstrap fallback sources (localStorage -> opener/window vars).
+    (() => {
+      statusEl.textContent = 'Waiting for podium data…';
+
+      // 1) LocalStorage fallback (works offline/no-API, same browser).
+      const fromStorage = readLocalPodium(boxId);
+      if (fromStorage.length) {
+        setWinners(fromStorage, 'localStorage');
+        return;
+      }
+
+      // 2) Window variable (set directly on this window by ControlPanel).
+      const deadline = Date.now() + 2000;
+      const poll = () => {
+        try {
+          const direct = normalizeWinners(window.ceremonyWinners);
+          if (direct.length) {
+            setWinners(direct, 'window');
+            return;
+          }
+        } catch {}
+        if (Date.now() < deadline && !sequence.length) {
+          setTimeout(poll, 100);
+          return;
+        }
+        // 3) Legacy: read from opener, best-effort.
+        try {
+          const legacy = normalizeWinners(window.opener && window.opener.ceremonyWinners);
+          if (legacy.length) {
+            setWinners(legacy, 'opener');
+            return;
+          }
+        } catch {}
+        statusEl.textContent = 'No podium data available.';
+      };
+      poll();
+    })();
   </script>
 </body>
 </html>
