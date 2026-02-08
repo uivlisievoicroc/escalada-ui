@@ -10,6 +10,7 @@ import { clearAuth } from './auth';
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
 const API = `${API_PROTOCOL}://${window.location.hostname}:8000/api/cmd`;
 const ADMIN_API = `${API_PROTOCOL}://${window.location.hostname}:8000/api/admin`;
+const STATE_API = `${API_PROTOCOL}://${window.location.hostname}:8000/api/state`;
 
 // ==================== SESSION ID & VERSION HELPERS ====================
 
@@ -401,6 +402,83 @@ export async function initRoute(
     return await response.json();
   } catch (err) {
     debugError('[initRoute] Error:', err);
+    throw err;
+  }
+}
+
+/**
+ * Set/update the timer preset for a box (admin setup).
+ * Persists to backend so all clients (e.g. Judge Remote) update in real time.
+ * @param {number} boxId - Box identifier
+ * @param {string} timerPreset - Timer preset (MM:SS)
+ * @throws {Error} If API request fails
+ */
+export async function setTimerPreset(boxId, timerPreset) {
+  const fetchAndStoreState = async () => {
+    const response = await fetchWithRetry(
+      `${STATE_API}/${boxId}`,
+      {
+        method: 'GET',
+        credentials: 'include',
+      },
+      3,
+      5000,
+    );
+    await validateResponse(response, 'GET_STATE');
+    const st = await response.json();
+    if (st?.sessionId) setSessionId(boxId, st.sessionId);
+    if (typeof st?.boxVersion === 'number') {
+      safeSetItem(`boxVersion-${boxId}`, String(st.boxVersion));
+    }
+    return st;
+  };
+
+  try {
+    let sessionId = getSessionId(boxId);
+    let boxVersion = getBoxVersion(boxId);
+
+    if (!sessionId) {
+      const st = await fetchAndStoreState();
+      sessionId = st?.sessionId;
+      boxVersion = typeof st?.boxVersion === 'number' ? st.boxVersion : undefined;
+    }
+
+    const doPost = async () => {
+      const response = await fetchWithRetry(
+        API,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            boxId,
+            type: 'SET_TIMER_PRESET',
+            timerPreset,
+            sessionId,
+            boxVersion,
+          }),
+        },
+        3,
+        5000,
+      );
+
+      await validateResponse(response, 'SET_TIMER_PRESET');
+      return await response.json();
+    };
+
+    let result = await doPost();
+    if (
+      result?.status === 'ignored' &&
+      (result.reason === 'stale_version' || result.reason === 'stale_session')
+    ) {
+      await fetchAndStoreState();
+      sessionId = getSessionId(boxId);
+      boxVersion = getBoxVersion(boxId);
+      result = await doPost();
+    }
+    return result;
+  } catch (err) {
+    debugError('[setTimerPreset] Error:', err);
     throw err;
   }
 }

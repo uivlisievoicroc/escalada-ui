@@ -62,6 +62,7 @@ export type WsStatus = 'closed' | 'open' | 'connecting' | 'error';
  */
 export type CommandType =
   | 'INIT_ROUTE'
+  | 'SET_TIMER_PRESET'
   | 'START_TIMER'
   | 'STOP_TIMER'
   | 'RESUME_TIMER'

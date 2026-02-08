@@ -1,4 +1,11 @@
-import React, { useEffect, useState, useRef, useCallback, FC } from 'react';
+// ContestPage (viewer/kiosk)
+// Full-screen contest display for a single box/category.
+// Designed for TVs/outdoor screens: big typography, high contrast, and no scroll.
+// Sync strategy:
+// - WebSocket provides authoritative state (`STATE_SNAPSHOT` + command echoes)
+// - Local countdown provides smooth animation between server updates
+// - localStorage + postMessage act as fallback bridges between tabs (ControlPanel/JudgePage/ContestPage)
+import React, { useEffect, useState, useRef, useCallback, FC, ComponentType } from 'react';
 import { useParams } from 'react-router-dom';
 import { debugLog, debugError, debugWarn } from '../utilis/debug';
 import { safeSetItem, safeGetItem, safeRemoveItem, safeGetJSON, storageKey } from '../utilis/storage';
@@ -8,12 +15,14 @@ import LoginOverlay from './LoginOverlay';
 import type { Competitor, WebSocketMessage } from '../types';
 // (WebSocket logic moved into component)
 
+// Build API/WS endpoints from current host (works on LAN for mobile/TV devices).
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
 const API_CMD = `${API_PROTOCOL}://${window.location.hostname}:8000/api/cmd`;
 const API_BASE = `${API_PROTOCOL}://${window.location.hostname}:8000/api`;
 const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws';
 
-// Internal type definitions
+// -------------------- Internal type definitions --------------------
+// These are local-only helper shapes for window messaging and ranking.
 interface RouteProgressProps {
   holds: number;
   current?: number;
@@ -73,7 +82,16 @@ type WindowMessage =
   | ClimberRequestMessage
   | ClimberResponseMessage;
 
-// RouteProgress: continuous 5 golden-ratio segments, alternating tilt
+interface LoginOverlayProps {
+  defaultUsername?: string;
+  title?: string;
+  onSuccess: () => void;
+}
+
+const TypedLoginOverlay = LoginOverlay as unknown as ComponentType<LoginOverlayProps>;
+
+// RouteProgress:
+// A decorative vertical progress rail built from golden-ratio segments, with a dot positioned by hold count.
 const RouteProgress: FC<RouteProgressProps> = ({
   holds,
   current = 0,
@@ -168,8 +186,11 @@ const RouteProgress: FC<RouteProgressProps> = ({
   );
 };
 
-// ===== helpers pentru clasament IFSC =====
-/** Returnează { [nume]: [rankPoints…] } şi numărul total de concurenţi */
+// -------------------- IFSC-style ranking helpers --------------------
+// Used for multi-route contests:
+// - For each route, compute rank points per competitor (ties share average rank)
+// - Aggregate routes via geometric mean of rank points
+/** Returns `{ [name]: [rankPoints...] }` and the total competitor count. */
 const calcRankPointsPerRoute = (
   scoresByName: ScoresByName,
   routeIdx: number,
@@ -220,7 +241,7 @@ const calcRankPointsPerRoute = (
   return { rankPoints, nCompetitors };
 };
 
-/** Calculează QP = media geometrică (rotunjit 3 zec.) */
+/** Geometric mean of rank points (rounded to 3 decimals). */
 const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: number): number => {
   // lipsă => loc maxim (nCompetitors + 1)
   const filled = arr.map((v) => v ?? nCompetitors + 1);
@@ -233,9 +254,11 @@ const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: nu
 };
 
 const ContestPage: FC = () => {
+  // Box id comes from the route (HashRouter). Keep as string for storage keys; convert to number when needed.
   const { boxId: boxIdParam } = useParams<{ boxId: string }>();
   const boxId = boxIdParam!; // Route ensures this exists
 
+  // Viewer auth state (ContestPage is "read-only" but still gated by token/role/box access).
   const [authActive, setAuthActive] = useState<boolean>(() => isAuthenticated());
   const [showLogin, setShowLogin] = useState<boolean>(() => !isAuthenticated());
 
@@ -274,11 +297,15 @@ const ContestPage: FC = () => {
       }
     })();
   }, []);
+
+  // Read timer preset (per-box key wins over global key). Used for timer reset + progress bar total.
   const getTimerPreset = useCallback(() => {
     const specific = safeGetItem(`climbingTime-${boxId}`);
     const global = safeGetItem('climbingTime');
     return specific || global || '05:00';
   }, [boxId]);
+
+  // Parse "on"/"off"/JSON booleans stored in localStorage (supports legacy formats).
   const parseTimeCriterionValue = (raw: string | null): boolean | null => {
     if (raw === 'on') return true;
     if (raw === 'off') return false;
@@ -289,6 +316,8 @@ const ContestPage: FC = () => {
       return null;
     }
   };
+
+  // Read time tiebreak setting (per-box first, then legacy global key).
   const readTimeCriterionEnabled = useCallback((): boolean => {
     const perBox = parseTimeCriterionValue(safeGetItem(`timeCriterionEnabled-${boxId}`));
     if (perBox !== null) return perBox;
@@ -299,7 +328,8 @@ const ContestPage: FC = () => {
     () => readTimeCriterionEnabled(),
   );
 
-  // --- Broadcast channel pentru sincronizare timere ---
+  // --- Timer sync bridge (BroadcastChannel + localStorage fallback) ---
+  // Allows multiple tabs (ControlPanel/JudgePage/ContestPage) to stay in sync without tight coupling.
   const timerChannelRef = useRef<BroadcastChannel | null>(null);
   const lastTimerSyncRef = useRef<number | null>(null);
   useEffect(() => {
@@ -326,6 +356,9 @@ const ContestPage: FC = () => {
     // Token is in httpOnly cookie; WebSocket handshake will include cookies automatically.
     const url = `${WS_PROTOCOL}://${window.location.hostname}:8000/api/ws/${boxId}`;
 
+    // Handle WS payloads for this box.
+    // - STATE_SNAPSHOT is authoritative and hydrates the full UI (safe to open mid-contest).
+    // - Command echoes are forwarded to `window.postMessage` so local handlers can update timer/progress consistently.
     const handleMessage = (msg: WebSocketMessage) => {
       if (msg.type === 'STATE_SNAPSHOT') {
         if (+msg.boxId !== Number(boxId)) return;
@@ -360,6 +393,10 @@ const ContestPage: FC = () => {
 	          safeSetItem(`climbingTime-${boxId}`, msg.timerPreset);
 	        }
 
+        // Build the visible queue from the competitors list:
+        // - skip `marked` (already scored) competitors
+        // - prefer backend-provided `currentClimber`/`preparingClimber` when present
+        // - otherwise derive from list order for robustness
         const competitors = Array.isArray(msg.competitors) ? msg.competitors : [];
         const names = competitors
           .filter((c: any) => c && typeof c === 'object' && !c.marked)
@@ -396,6 +433,9 @@ const ContestPage: FC = () => {
           }
         }
 
+        // Timer hydration:
+        // - `remaining` is authoritative when server-side timer is enabled
+        // - otherwise fall back to `timerPresetSec` so the UI shows the initial value
         const remainingRaw = typeof msg.remaining === 'number' ? msg.remaining : null;
         const remainingSec =
           remainingRaw != null && Number.isFinite(remainingRaw) ? Math.max(0, Math.ceil(remainingRaw)) : null;
@@ -410,6 +450,7 @@ const ContestPage: FC = () => {
             setTimerSec(sec);
             timerSecRef.current = sec;
             safeSetItem(`timer-${boxId}`, sec.toString());
+            // Tick leader election (simple): only one tab continues the local countdown.
             const owner = safeGetItem(`tick-owner-${boxId}`);
             if (!owner) {
               safeSetItem(`tick-owner-${boxId}`, window.name || 'tick-owner');
@@ -460,6 +501,7 @@ const ContestPage: FC = () => {
           setChiefRoutesetter((msg as any).chiefRoutesetter || '—');
         }
       }
+      // Mirror time-tiebreak flag changes (admin setup) into UI + localStorage.
       if (msg.type === 'SET_TIME_CRITERION') {
         if (+msg.boxId !== Number(boxId)) return;
         if (typeof msg.timeCriterionEnabled === 'boolean') {
@@ -467,6 +509,7 @@ const ContestPage: FC = () => {
           safeSetItem(`timeCriterionEnabled-${boxId}`, msg.timeCriterionEnabled ? 'on' : 'off');
         }
       }
+      // Route init resets queue, progress, and timer to the preset value.
       if (msg.type === 'INIT_ROUTE') {
         const { routeIndex, competitors, holdsCount } = msg;
         setRouteIdx(routeIndex);
@@ -491,6 +534,7 @@ const ContestPage: FC = () => {
         timerSecRef.current = resetVal;
         return;
       }
+      // Forward timer/progress events to local postMessage handlers (keeps WS handler small and consistent).
       if (msg.type === 'START_TIMER') {
         window.postMessage({ type: 'START_TIMER', boxId: msg.boxId }, '*');
       }
@@ -503,6 +547,7 @@ const ContestPage: FC = () => {
       if (msg.type === 'PROGRESS_UPDATE') {
         window.postMessage({ type: 'PROGRESS_UPDATE', boxId: msg.boxId, delta: msg.delta }, '*');
       }
+      // Allow other tabs to request the currently active competitor (used by ControlPanel score flow).
       if (msg.type === 'REQUEST_ACTIVE_COMPETITOR') {
         safeSetItem(
           'climb_response',
@@ -514,6 +559,7 @@ const ContestPage: FC = () => {
           }),
         );
       }
+      // Forward score submission to the local handler (updates rankings, queue, and end-of-contest logic).
       if (msg.type === 'SUBMIT_SCORE') {
         window.postMessage(
           {
@@ -528,6 +574,8 @@ const ContestPage: FC = () => {
       }
     };
 
+    // Establish a WS connection and keep it alive with exponential backoff reconnects.
+    // On open, request an immediate STATE_SNAPSHOT so the UI hydrates deterministically.
     const connect = () => {
       const ws = new WebSocket(url);
       wsRef.current = ws;
@@ -616,13 +664,22 @@ const ContestPage: FC = () => {
       }
     };
   }, [boxId, getTimerPreset, authActive]);
+
+  // -------------------- Contest flow state (queue + timer + rankings) --------------------
+  // Queue model:
+  // - `climbing`: active climber currently on the wall
+  // - `preparing[0]`: "on deck" (next climber)
+  // - `remaining`: waiting list (rest of unmarked competitors)
   const [preparing, setPreparing] = useState<string[]>([]);
 
   const [climbing, setClimbing] = useState<string>('');
   const climbingRef = useRef<string>('');
+  // Keep a ref for the current climber so async handlers (storage/message/WS) read the latest value.
   useEffect(() => {
     climbingRef.current = climbing;
   }, [climbing]);
+
+  // Listen for time-criterion toggles coming from ControlPanel (stored as localStorage keys).
   useEffect(() => {
     const onToggle = (e: StorageEvent) => {
       if (!e.key) return;
@@ -639,6 +696,7 @@ const ContestPage: FC = () => {
     return () => window.removeEventListener('storage', onToggle);
   }, [boxId]);
 
+  // Tune the progress rail height for large TVs vs smaller screens (keeps layout single-screen).
   useEffect(() => {
     const onResize = () => {
       setBarHeight(window.innerHeight >= 900 ? 360 : 260);
@@ -647,12 +705,17 @@ const ContestPage: FC = () => {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  // Sincronizează competitorul curent în localStorage
+  // Publish the current climber to localStorage so other tabs/pages can display it.
   useEffect(() => {
     safeSetItem(`currentClimber-${boxId}`, climbing);
   }, [climbing, boxId]);
 
   const [remaining, setRemaining] = useState<string[]>([]);
+
+  // Timer state:
+  // - `timerSec`: currently displayed remaining seconds
+  // - `endTimeMs`: absolute end timestamp used for countdown
+  // - `tick-owner-${boxId}`: ensures only one tab "owns" the local ticker
   const [timerSec, setTimerSec] = useState<number>(() => {
     const t = getTimerPreset();
     const [m, s] = t.split(':').map(Number);
@@ -671,6 +734,8 @@ const ContestPage: FC = () => {
   useEffect(() => {
     endTimeRef.current = endTimeMs;
   }, [endTimeMs]);
+
+  // Rankings state (per name, per route index). Persisted to localStorage for export/award ceremony fallback.
   const [ranking, setRanking] = useState<ScoresByName>(() => ({})); // { nume: [scores…] }
   const rankingRef = useRef<ScoresByName>(ranking);
   useEffect(() => {
@@ -681,6 +746,8 @@ const ContestPage: FC = () => {
   useEffect(() => {
     rankingTimesRef.current = rankingTimes;
   }, [rankingTimes]);
+
+  // Box metadata + UI state.
   const [running, setRunning] = useState<boolean>(false);
   const [category, setCategory] = useState<string>('');
   const [routeIdx, setRouteIdx] = useState<number>(1);
@@ -693,6 +760,8 @@ const ContestPage: FC = () => {
   const [barHeight, setBarHeight] = useState<number>(() =>
     window.innerHeight >= 900 ? 360 : 260,
   );
+
+  // Route/competition officials displayed in the "Route Info" area.
   const readRoutesetterName = useCallback(() => {
     // Load routesetter name for current route
     const perRoute = safeGetItem(`routesetterName-${boxId}-${routeIdx}`);
@@ -721,6 +790,7 @@ const ContestPage: FC = () => {
   );
   const [chiefRoutesetter, setChiefRoutesetter] = useState<string>(() => readChiefRoutesetter());
 
+  // Keep Route Info (routesetter + officials) in sync when ControlPanel updates localStorage.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (!e.key) return;
@@ -758,8 +828,11 @@ const ContestPage: FC = () => {
     readJudgeChief,
     readCompetitionDirector,
     readChiefRoutesetter,
-  ]);
+	  ]);
 
+  // Broadcast remaining time to:
+  // 1) other tabs (BroadcastChannel/localStorage) and
+  // 2) the backend (TIMER_SYNC, best-effort) to keep public/live views up to date.
   const broadcastRemaining = useCallback(
     (remaining: number) => {
       try {
@@ -774,6 +847,7 @@ const ContestPage: FC = () => {
       } catch (err) {
         debugError('Failed to broadcast remaining time', err);
       }
+      // Avoid spamming TIMER_SYNC; only sync when the displayed remaining value changes.
       if (lastTimerSyncRef.current !== remaining) {
         lastTimerSyncRef.current = remaining;
         const sessionId = safeGetItem(`sessionId-${boxId}`) || undefined;
@@ -798,6 +872,7 @@ const ContestPage: FC = () => {
     [boxId],
   );
 
+  // Format seconds as MM:SS for timer display.
   const formatSeconds = (sec: number): string | null => {
     if (typeof sec !== 'number' || Number.isNaN(sec)) return null;
     const m = Math.floor(sec / 60)
@@ -807,6 +882,7 @@ const ContestPage: FC = () => {
     return `${m}:${s}`;
   };
 
+  // Start a fresh countdown from the configured preset.
   const startCountdown = useCallback(() => {
     const presetValue = getTimerPreset();
     const [m, s] = presetValue.split(':').map(Number);
@@ -822,6 +898,7 @@ const ContestPage: FC = () => {
     broadcastRemaining(duration ?? 0);
   }, [broadcastRemaining, boxId, getTimerPreset]);
 
+  // Pause the countdown and persist the remaining seconds.
   const pauseCountdown = useCallback(() => {
     const remaining = endTimeRef.current
       ? Math.max(0, Math.ceil((endTimeRef.current - Date.now()) / 1000))
@@ -839,6 +916,7 @@ const ContestPage: FC = () => {
     broadcastRemaining(remaining);
   }, [boxId, broadcastRemaining]);
 
+  // Resume the countdown from the currently displayed remaining seconds.
   const resumeCountdown = useCallback(() => {
     const remaining = timerSecRef.current;
     if (remaining <= 0) {
@@ -851,7 +929,7 @@ const ContestPage: FC = () => {
     safeSetItem(`tick-owner-${boxId}`, window.name || 'tick-owner');
   }, [boxId]);
 
-  // ===== R1 START_TIMER =====
+  // Timer commands arrive via `postMessage` (forwarded from WS events or other tabs).
   useEffect(() => {
     const onTimerCommand = (e: MessageEvent<WindowMessage>) => {
       if (+e.data?.boxId !== +boxId) return;
@@ -871,7 +949,7 @@ const ContestPage: FC = () => {
 
   // (INIT_ROUTE via WebSocket handled above; removed old postMessage INIT_ROUTE handler)
 
-  // Handle +1 Hold button updates
+  // Progress updates arrive via `postMessage` and update the on-screen progress rail.
   useEffect(() => {
     const onProgressUpdate = (e: MessageEvent<WindowMessage>) => {
       if (e.data?.type === 'PROGRESS_UPDATE' && +e.data.boxId === +boxId) {
@@ -889,7 +967,7 @@ const ContestPage: FC = () => {
     return () => window.removeEventListener('message', onProgressUpdate);
   }, [boxId, holdsCount]);
 
-  // Synchronize commands from JudgePage via localStorage
+  // Synchronize commands from JudgePage via localStorage (fallback bridge for cross-tab communication).
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (!e.key || !e.newValue) return;
@@ -929,7 +1007,8 @@ const ContestPage: FC = () => {
     return () => window.removeEventListener('storage', onStorage);
   }, [boxId]);
 
-  // R1 ticking loop
+  // Local ticking loop (requestAnimationFrame).
+  // Only the elected "tick owner" keeps ticking to avoid multiple tabs drifting the countdown.
   useEffect(() => {
     if (!running || endTimeMs == null) return;
     const tick = () => {
@@ -959,7 +1038,7 @@ const ContestPage: FC = () => {
     };
   }, [running, endTimeMs, boxId, broadcastRemaining]);
 
-  // R1 initialization
+  // Initial UI fallback from localStorage `listboxes` (used before WS snapshot arrives).
   useEffect(() => {
     const all = JSON.parse(safeGetItem('listboxes') || '[]');
     const box = all[boxId];
@@ -981,7 +1060,7 @@ const ContestPage: FC = () => {
     setCategory(box.categorie || '');
   }, [boxId]);
 
-  // R1 response
+  // Respond to "who is climbing?" requests from other tabs via storage events.
   useEffect(() => {
     const handleRequestR1 = (e: StorageEvent) => {
       if (e.key === storageKey('climb_request') || e.key === 'climb_request') {
@@ -1003,7 +1082,11 @@ const ContestPage: FC = () => {
     return () => window.removeEventListener('storage', handleRequestR1);
   }, [boxId, climbing]);
 
-  // R1 specific logic
+  // Handle score submissions (SUBMIT_SCORE) coming via `postMessage`:
+  // - update rankings (scores + optional times)
+  // - mark competitor as completed in listboxes
+  // - advance queue + reset timer
+  // - detect contest end and persist podium/ranking for award ceremony + exports
   useEffect(() => {
     const handleMessageR1 = (e: MessageEvent<WindowMessage>) => {
       if (e.data?.type !== 'SUBMIT_SCORE' || +e.data.boxId !== +boxId) return;
@@ -1182,9 +1265,9 @@ const ContestPage: FC = () => {
   return (
     <>
       {showLogin && (
-        <LoginOverlay
+        <TypedLoginOverlay
           defaultUsername="viewer"
-          title="Autentificare spectator"
+          title="Spectator Authentication"
           onSuccess={() => {
             setAuthActive(true);
             setShowLogin(false);

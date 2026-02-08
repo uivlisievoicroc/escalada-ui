@@ -1,3 +1,10 @@
+// ControlPanel (admin)
+// Primary admin dashboard used to manage multiple contest boxes (categories) at once.
+// Responsibilities:
+// - Box lifecycle: upload/delete/init/reset/next-route
+// - Live commands: start/stop/resume timer, +hold progress, submit score, time criterion toggle
+// - Cross-tab/device sync: authenticated per-box WebSockets + BroadcastChannel/localStorage bridges
+// NOTE: This file is intentionally large/monolithic; section comments below map the major blocks.
 import QRCode from 'react-qr-code';
 import React, { useState, useEffect, useRef, Suspense, lazy, FC } from 'react';
 import { debugLog, debugWarn, debugError } from '../utilis/debug';
@@ -16,6 +23,7 @@ import {
   requestActiveCompetitor,
   submitScore,
   initRoute,
+  setTimerPreset,
   getSessionId,
   setSessionId,
   getBoxVersion,
@@ -34,12 +42,17 @@ import {
   setJudgePassword as setJudgePasswordApi,
 } from '../utilis/auth';
 import { downloadOfficialResultsZip } from '../utilis/backup';
-import LoginOverlay from './LoginOverlay';
+import LoginOverlayImpl from './LoginOverlay';
 
-// Map boxId -> reference to the opened contest tab
+const LoginOverlay = LoginOverlayImpl as unknown as React.ComponentType<{
+  title: string;
+  onSuccess: () => void;
+}>;
+
+// Map `boxId -> Window` for any opened ContestPage tabs (used for focus/close and best-effort UI sync).
 const openTabs: { [boxId: number]: Window | null } = {};
 
-// Get API constants at runtime
+// Build API/WS endpoints from the current host (works for LAN deployments and mobile/tablet devices).
 const getApiConfig = () => {
   const protocol = window.location.protocol === 'https:' ? 'https' : 'http';
   const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -154,6 +167,7 @@ const readTimeCriterionEnabled = (boxId: number): boolean => {
   return legacy ?? false;
 };
 
+// Helpers for managing external tabs/windows and building QR URLs.
 const isTabAlive = (t: Window | null): boolean => {
   try {
     return t !== null && !t.closed;
@@ -168,6 +182,8 @@ const buildPublicHubUrl = (): string => {
   return `${window.location.origin}/#/public`;
 };
 
+// Unique per-tab identifier used in TIMER_SYNC messages so we can detect "external" timer leaders
+// (e.g. ContestPage on another device) and avoid competing.
 const CONTROL_PANEL_TIMER_SYNC_SOURCE_KEY = 'escalada:controlpanel:timerSyncSource';
 const CONTROL_PANEL_TIMER_SYNC_SOURCE_PREFIX = 'timer_sync_source:controlpanel:';
 const getControlPanelTimerSyncSource = (): string => {
@@ -184,7 +200,8 @@ const getControlPanelTimerSyncSource = (): string => {
 
 const ModalScore = lazy(() => import('./ModalScore'));
 const ControlPanel: FC = () => {
-  // Ignoră WS close noise la demontare (attach once, with cleanup)
+  // Suppress noisy "WebSocket closed" errors that can appear during teardown in some browsers.
+  // This attaches a global `window.onerror` handler once and removes it on unmount.
   useEffect(() => {
     const handler = (e: ErrorEvent): void => {
       if (e.message?.includes('WebSocket') && e.message?.includes('closed')) {
@@ -194,6 +211,9 @@ const ControlPanel: FC = () => {
     window.addEventListener('error', handler);
     return () => window.removeEventListener('error', handler);
   }, []);
+
+  // -------------------- Modal/dialog UI state (ControlPanel only) --------------------
+  // Controls visibility and inputs for overlays like timer preset, reset, QR, officials, and scoring modals.
   const [showBoxTimerDialog, setShowBoxTimerDialog] = useState<boolean>(false);
   const [timerDialogBoxId, setTimerDialogBoxId] = useState<number | null>(null);
   const [timerDialogValue, setTimerDialogValue] = useState<string>('');
@@ -237,6 +257,9 @@ const ControlPanel: FC = () => {
   useEffect(() => {
     controlTimersRef.current = controlTimers;
   }, [controlTimers]);
+
+  // Load persisted box definitions from localStorage and normalize timer presets.
+  // This is the editable "admin config" for categories, competitors, and routes.
   const loadListboxes = (): Box[] => {
     const saved = safeGetItem('listboxes');
     const globalPreset = readClimbingTime();
@@ -248,10 +271,19 @@ const ControlPanel: FC = () => {
       timerPreset: lb.timerPreset || globalPreset,
     }));
   };
+
+  // -------------------- Persisted box definitions --------------------
+  // `listboxes` is the admin-defined contest configuration (category, competitors, routes).
+  // It is persisted to localStorage so refreshes or multiple ControlPanel tabs stay consistent.
   const [listboxes, setListboxes] = useState<Box[]>(loadListboxes);
+  // Global/default timer preset (per-box presets are stored under `climbingTime-${boxId}`).
   const [climbingTime, setClimbingTime] = useState<string>(readClimbingTime);
+
+  // -------------------- Per-box live state (mirrors backend/WS) --------------------
+  // These values are driven by WebSocket command echoes + authoritative STATE_SNAPSHOT payloads.
   const [timeCriterionByBox, setTimeCriterionByBox] = useState<Record<number, boolean>>({});
   const [timerStates, setTimerStates] = useState<{ [boxId: number]: TimerState }>({});
+  // Used when requesting the current climber for score submission (async response opens the score modal).
   const [activeBoxId, setActiveBoxId] = useState<number | null>(null);
   const [activeCompetitor, setActiveCompetitor] = useState<string>('');
   const [showScoreModal, setShowScoreModal] = useState<boolean>(false);
@@ -271,6 +303,9 @@ const ControlPanel: FC = () => {
     Record<number, { message: string; type: 'info' | 'error' }>
   >({});
   const [loadingBoxes, setLoadingBoxes] = useState<LoadingBoxes>(new Set()); // TASK 3.1: Track loading operations
+
+  // -------------------- Admin auth + export selection --------------------
+  // Admin actions are gated by an httpOnly cookie token + stored role.
   const [adminRole, setAdminRole] = useState<string | null>(() => getStoredRole());
   const [showAdminLogin, setShowAdminLogin] = useState<boolean>(() => {
     const authenticated = isAuthenticated();
@@ -279,13 +314,14 @@ const ControlPanel: FC = () => {
   });
   const [exportBoxId, setExportBoxId] = useState<number>(0);
 
-  // Refs pentru a păstra ultima versiune a stărilor
+  // -------------------- Refs to avoid stale closures in WS handlers --------------------
+  // WebSocket callbacks are created once per box; refs allow them to read the latest React state safely.
   const listboxesRef = useRef<Box[]>(listboxes);
   const currentClimbersRef = useRef<{ [boxId: number]: string }>(currentClimbers);
   const timerStatesRef = useRef<{ [boxId: number]: TimerState }>(timerStates);
   const holdClicksRef = useRef<{ [boxId: number]: number }>(holdClicks);
 
-  // Menține ref-urile actualizate la fiecare schimbare de stare
+  // Keep refs updated whenever React state changes.
   useEffect(() => {
     listboxesRef.current = listboxes;
   }, [listboxes]);
@@ -302,6 +338,8 @@ const ControlPanel: FC = () => {
     holdClicksRef.current = holdClicks;
   }, [holdClicks]);
 
+  // Initialize per-box "time criterion" flags from localStorage after boxes are loaded.
+  // (We keep this separate from `loadListboxes()` because the flags may change at runtime.)
   useEffect(() => {
     if (listboxes.length === 0) return;
     setTimeCriterionByBox((prev) => {
@@ -322,14 +360,23 @@ const ControlPanel: FC = () => {
     }
   }, [listboxes, setupBoxId]);
 
-  // WebSocket: subscribe to each box channel and mirror updates from JudgePage
+  // -------------------- WebSocket subscriptions (per box) --------------------
+  // Each box gets an authenticated WS connection (`/api/ws/{boxId}`) that:
+  // - Mirrors backend command echoes into local UI state
+  // - Provides authoritative `STATE_SNAPSHOT` hydration
+  // - Responds to `REQUEST_STATE` so other tabs (JudgePage/ContestPage) can resync quickly
   const wsRefs = useRef<{ [boxId: string]: WebSocket }>({});
   const disconnectFnsRef = useRef<{ [boxId: string]: () => void }>({}); // TASK 2.4: Store disconnect functions for cleanup
+
+  // Timer leadership/sync helpers: identify ControlPanel as a timer source and avoid competing with other tabs/devices.
   const timerSyncSourceRef = useRef<string>(getControlPanelTimerSyncSource());
   const lastExternalTimerSyncAtRef = useRef<Record<number, number>>({});
   const timerEngineEndAtMsRef = useRef<Record<number, number | null>>({});
   const timerEngineLastRemainingRef = useRef<Record<number, number>>({});
   const timerEngineLastSentAtRef = useRef<Record<number, number>>({});
+
+  // -------------------- Time criterion (tiebreak) helpers --------------------
+  // Persist the toggle locally (per box) and optionally propagate to the backend with optimistic concurrency.
   const getTimeCriterionEnabled = (boxId: number): boolean => {
     const stored = timeCriterionByBox[boxId];
     if (typeof stored === 'boolean') return stored;
@@ -354,6 +401,7 @@ const ControlPanel: FC = () => {
     setTimeCriterionState(boxId, enabled, false);
   };
 
+  // Update local state immediately, then persist to backend (rollback on failure).
   const propagateTimeCriterion = async (boxId: number, enabled: boolean): Promise<void> => {
     const previous = getTimeCriterionEnabled(boxId);
     syncTimeCriterion(boxId, enabled);
@@ -387,7 +435,10 @@ const ControlPanel: FC = () => {
     }
   };
 
-  // Ensure we always have a fresh sessionId per box (needed for state isolation)
+  // Prefetch the current backend state per box to populate:
+  // - `sessionId` (isolates state between boxes)
+  // - `boxVersion` (optimistic concurrency / stale detection)
+  // - server-driven flags like `timeCriterionEnabled`
   useEffect(() => {
     const config = getApiConfig();
     // Check if authenticated (token in httpOnly cookie)
@@ -424,14 +475,19 @@ const ControlPanel: FC = () => {
       })();
     });
   }, [listboxes]);
+
+  // Create/maintain per-box WebSocket connections and translate incoming messages into React state.
+  // Dependencies: this effect re-runs when `listboxes` changes (box add/delete), and cleans up orphan sockets.
   useEffect(() => {
     listboxes.forEach((lb, idx) => {
       // Only create new WebSocket if we don't have one for this idx
       if (!wsRefs.current[idx]) {
         const handleMessage = (msg: WebSocketMessage): void => {
-          debugLog('📥 WS mesaj primit în ControlPanel:', msg);
+          debugLog('📥 WS message received in ControlPanel:', msg);
           if (!('boxId' in msg) || +msg.boxId !== idx) return;
 
+          // Apply backend-driven updates into local UI state.
+          // Many commands include `boxVersion`; we persist it so subsequent actions avoid "stale_version".
           switch (msg.type) {
             case 'START_TIMER':
               setTimerStates((prev) => ({ ...prev, [idx]: 'running' }));
@@ -518,6 +574,8 @@ const ControlPanel: FC = () => {
               }
               break;
             case 'REQUEST_STATE':
+              // Another client/tab asked for our current view of the box state.
+              // We respond with a lightweight snapshot to speed up hydration without extra HTTP requests.
               {
                 const box = listboxesRef.current[idx] || {};
                 (async () => {
@@ -543,6 +601,7 @@ const ControlPanel: FC = () => {
               }
               break;
             case 'STATE_SNAPSHOT':
+              // Authoritative hydration payload (usually sent on connect or after REQUEST_STATE).
               if (msg.sessionId) {
                 setSessionId(idx, msg.sessionId);
               }
@@ -774,9 +833,11 @@ const ControlPanel: FC = () => {
     };
   }, []); // Empty dependency array - only run on mount/unmount
 
-  // Ascultă sincronizarea timerelor via localStorage (evenimentul 'storage')
+  // -------------------- Timer bridges (BroadcastChannel + localStorage) --------------------
+  // Keep timer state + remaining seconds in sync across tabs/windows (ControlPanel/ContestPage/JudgePage).
+  // BroadcastChannel is preferred; the `storage` event is a fallback for older environments.
   useEffect(() => {
-    // BroadcastChannel pentru comenzi timer (START/STOP/RESUME) din alte ferestre
+    // Timer state commands (START/STOP/RESUME) coming from other windows.
     type TimerCmd = { type: 'START_TIMER' | 'STOP_TIMER' | 'RESUME_TIMER'; boxId: number };
     let bcCmd: BroadcastChannel | undefined;
     const handleTimerCmd = (cmd: Partial<TimerCmd> | null | undefined) => {
@@ -798,7 +859,7 @@ const ControlPanel: FC = () => {
       if (cmd) handleTimerCmd(cmd);
     };
     window.addEventListener('storage', onStorageCmd);
-    // BroadcastChannel (preferat)
+    // Remaining-time sync (preferred via BroadcastChannel).
     let bc: BroadcastChannel | undefined;
     if ('BroadcastChannel' in window) {
       bc = new BroadcastChannel('escalada-timer');
@@ -849,6 +910,9 @@ const ControlPanel: FC = () => {
     return `${m}:${s}`;
   };
 
+  // -------------------- Timer preset + persistence helpers --------------------
+  // Presets are stored per box under `climbingTime-${boxId}` (with a global fallback).
+  // Remaining time is stored under `timer-${boxId}` so refreshes/reconnects keep the current countdown.
 	  const getTimerPreset = (idx: number): string => {
 	    const stored = safeGetItem(`climbingTime-${idx}`);
 	    const lb = listboxesRef.current[idx] || listboxes[idx];
@@ -864,7 +928,7 @@ const ControlPanel: FC = () => {
 	    return mm * 60 + ss;
 	  };
 
-	  // convert preset MM:SS în secunde pentru un box
+	  // Convert preset MM:SS to seconds for a given box.
 	  const defaultTimerSec = (idx: number) => {
 	    return presetToSeconds(getTimerPreset(idx));
 	  };
@@ -878,6 +942,8 @@ const ControlPanel: FC = () => {
 	    }
 	  };
 
+  // Send a TIMER_SYNC command to the backend so other clients (public/live, ContestPage, JudgePage)
+  // can display a consistent remaining time even when this ControlPanel is the timer "leader".
   const sendTimerSync = async (boxId: number, remaining: number): Promise<void> => {
     const sessionId = getSessionId(boxId);
     if (!sessionId) return;
@@ -920,6 +986,7 @@ const ControlPanel: FC = () => {
 	    return Number.isFinite(parsed) ? parsed : null;
 	  };
 
+  // Clear the locally stored registered time for this box (used when restarting a climb).
   const clearRegisteredTime = (idx: number) => {
     setRegisteredTimes((prev) => {
       const { [idx]: _, ...rest } = prev;
@@ -933,7 +1000,7 @@ const ControlPanel: FC = () => {
   };
 
 	  useEffect(() => {
-	    // Inițializare timere din localStorage la încărcare pagină
+	    // Initialize timers from localStorage on page load so UI has a value before WS hydration.
 	    const initial: { [key: number]: number } = {};
 	    listboxes.forEach((_, idx) => {
 	      const v = safeGetItem(`timer-${idx}`);
@@ -945,7 +1012,7 @@ const ControlPanel: FC = () => {
 	    });
 	    setControlTimers(initial);
 
-    // Ascultă evenimentul 'storage' pentru sincronizare
+    // Listen to the `storage` event so timer updates from other tabs/windows are reflected here.
     const handleStorage = (e: StorageEvent) => {
       if (!e.key) return;
       const nsPrefix = storageKey('timer-');
@@ -1040,6 +1107,8 @@ const ControlPanel: FC = () => {
     return () => clearInterval(interval);
   }, [timerStates]);
 
+  // Sync per-box `registeredTime` from localStorage and listen for changes from other tabs (e.g. JudgePage).
+  // Used when "time criterion" is enabled for tie-breaking.
   useEffect(() => {
     const initial: { [boxId: number]: number } = {};
     listboxes.forEach((_, idx) => {
@@ -1074,6 +1143,8 @@ const ControlPanel: FC = () => {
     return () => window.removeEventListener('storage', onStorageRegistered);
   }, [listboxes]);
 
+  // Sync `currentClimber-${boxId}` changes from other tabs/windows into ControlPanel.
+  // We also forward an `ACTIVE_CLIMBER` command to the backend so other WS subscribers can update quickly.
   useEffect(() => {
     const handleStorageClimber = (e: StorageEvent) => {
       if (!e.key) return;
@@ -1108,10 +1179,12 @@ const ControlPanel: FC = () => {
     return () => window.removeEventListener('storage', handleStorageClimber);
   }, []);
 
+  // Persist listboxes after any local edit (upload/delete/reset edits, etc.).
   useEffect(() => {
     safeSetItem('listboxes', JSON.stringify(listboxes));
   }, [listboxes]);
 
+  // Listen for listbox updates from other ControlPanel tabs (storage event) and adopt them.
   useEffect(() => {
     const onListboxChange = (e: StorageEvent) => {
       if (e.key === storageKey('listboxes') || e.key === 'listboxes') {
@@ -1125,6 +1198,8 @@ const ControlPanel: FC = () => {
     return () => window.removeEventListener('storage', onListboxChange);
   }, []);
 
+  // Listen for per-box time-criterion toggles coming from other tabs/windows.
+  // We "adopt" without re-persisting to avoid feedback loops.
   useEffect(() => {
     const onStorageToggle = (e: StorageEvent) => {
       if (!e.key) return;
@@ -1142,6 +1217,8 @@ const ControlPanel: FC = () => {
     return () => window.removeEventListener('storage', onStorageToggle);
   }, []);
 
+  // localStorage bridge for `requestActiveCompetitor` -> response.
+  // When the response matches the active box, open the score modal with the resolved competitor.
   useEffect(() => {
     const handleMessage = (e: StorageEvent) => {
       if (e.key === storageKey('climb_response') || e.key === 'climb_response') {
@@ -1156,12 +1233,15 @@ const ControlPanel: FC = () => {
     return () => window.removeEventListener('storage', handleMessage);
   }, [activeBoxId]);
 
+  // -------------------- Box management (upload/delete/reset/init/route) --------------------
+  // ControlPanel owns the editable box configuration and triggers backend init/reset commands when needed.
   const handleUpload = (data: {
     categorie: string;
     concurenti: Competitor[];
     routesCount?: number | string;
     holdsCounts?: Array<number | string>;
   }) => {
+    // Add a new box definition locally (backend state is created on initiate/initRoute).
     const { categorie, concurenti, routesCount, holdsCounts } = data;
     const routesCountNum = Number(routesCount) || (Array.isArray(holdsCounts) ? holdsCounts.length : 0);
     const holdsCountsNum = Array.isArray(holdsCounts) ? holdsCounts.map((h) => Number(h)) : [];
@@ -1197,6 +1277,8 @@ const ControlPanel: FC = () => {
     setAdminActionsView('actions');
   };
 
+  // Delete a box from ControlPanel and clean up backend + local state.
+  // This also reindexes localStorage keys so remaining boxes keep consistent ids.
   const handleDelete = async (index: number): Promise<void> => {
     // Reset backend state to avoid stale snapshots
     try {
@@ -1311,6 +1393,7 @@ const ControlPanel: FC = () => {
     }
   };
 
+  // Confirm guard for destructive "delete box" action.
   const confirmDeleteBox = (index: number): boolean => {
     const box = listboxesRef.current[index];
     const label = box?.categorie ? `Box ${index} (${box.categorie})` : `Box ${index}`;
@@ -1319,12 +1402,14 @@ const ControlPanel: FC = () => {
     );
   };
 
+  // Open the reset dialog (all options start unchecked so the user explicitly selects what to reset).
   const openResetDialog = (index: number): void => {
     setResetDialogBoxId(index);
     setResetDialogOpts({ resetTimer: false, clearProgress: false, closeTab: false, unmarkAll: false });
     setShowResetDialog(true);
   };
 
+  // Apply the reset options: optimistic UI updates + backend reset (partial) with a resync-and-retry on stale_version.
   const applyResetDialog = async (): Promise<void> => {
     if (resetDialogBoxId == null) return;
     const boxIdx = resetDialogBoxId;
@@ -1415,6 +1500,7 @@ const ControlPanel: FC = () => {
     }
   };
 
+    // Open (or focus) the dedicated ContestPage tab for a given box.
     const openClimbingPage = (boxId: number): Window | null => {
       const existingTab = openTabs[boxId];
       if (isTabAlive(existingTab)) {
@@ -1427,8 +1513,9 @@ const ControlPanel: FC = () => {
       return tab;
     };
 
+	  // Initiate a contest box for the current route (without automatically opening ContestPage).
 	  const handleInitiate = (index: number): void => {
-	    // 1. Marchează listbox‑ul ca inițiat
+	    // 1) Optimistic local state: mark box initiated and reset per-climb UI state.
 	    setListboxes((prev) => prev.map((lb, i) => (i === index ? { ...lb, initiated: true } : lb)));
 	    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
 	    clearRegisteredTime(index);
@@ -1441,8 +1528,8 @@ const ControlPanel: FC = () => {
 		    }
 		    setTimerSecondsForBox(index, presetToSeconds(preset));
 
-        // 2. Trimite mesaj de (re)inițiere pentru traseul curent prin HTTP+WS
-        // IMPORTANT: nu mai deschide automat pagina de climbing.
+        // 2) Send INIT_ROUTE for the current route via HTTP (+ WS echoes for other subscribers).
+        // IMPORTANT: we no longer auto-open the climbing page; ControlPanel must work headless.
         const lb = listboxes[index];
         initRoute(
           index,
@@ -1454,7 +1541,7 @@ const ControlPanel: FC = () => {
         lb.holdsCounts,
         lb.categorie,
       );
-      // 3. Initialize remaining time for public/live views even if ContestPage isn't open.
+      // 3) Seed initial remaining time for public/live views even if ContestPage isn't open.
       sendTimerSync(index, presetToSeconds(preset));
   };
 
@@ -1463,8 +1550,8 @@ const ControlPanel: FC = () => {
     await handleDelete(index);
   };
 
-  // Advance to the next route on demand
-  const handleNextRoute = (index: number): void => {
+	  // Advance to the next route on demand
+	  const handleNextRoute = (index: number): void => {
     // NEW: Bounds check for box index
     if (index < 0 || index >= listboxes.length) {
       debugError(`Invalid box index: ${index}`);
@@ -1486,7 +1573,7 @@ const ControlPanel: FC = () => {
       prev.map((lb, i) => {
         if (i !== index) return lb;
         const nextRoute = lb.routeIndex + 1;
-        if (nextRoute > lb.routesCount) return lb; // nu depășește
+        if (nextRoute > lb.routesCount) return lb; // do not exceed routesCount
         return {
           ...lb,
           routeIndex: nextRoute,
@@ -1496,34 +1583,24 @@ const ControlPanel: FC = () => {
         };
       }),
     );
-	    // resetează contorul local de holds
+	    // Reset local holds counter.
 	    setHoldClicks((prev) => ({ ...prev, [index]: 0 }));
-	    // reset timer button
+	    // Reset timer UI.
 	    setTimerStates((prev) => ({ ...prev, [index]: 'idle' }));
 	    setTimerSecondsForBox(index, defaultTimerSec(index));
 	    clearRegisteredTime(index);
 	    // Keep `ranking-*` history across routes so we can compute overall podium
 	    // and generate rankings without requiring ContestPage to be open.
-    // Send INIT_ROUTE for the next route
-    const updatedBox = listboxes[index];
-    const nextRouteIndex = updatedBox.routeIndex + 1;
-    if (nextRouteIndex <= updatedBox.routesCount) {
-      const nextHoldsCount = updatedBox.holdsCounts[nextRouteIndex - 1];
-      const nextCompetitors = updatedBox.concurenti.map((c) => ({ ...c, marked: false }));
-      initRoute(
-        index,
-        nextRouteIndex,
-        nextHoldsCount,
-        nextCompetitors,
-        getTimerPreset(index),
-        updatedBox.routesCount,
-        updatedBox.holdsCounts,
-        updatedBox.categorie,
-      );
-      sendTimerSync(index, presetToSeconds(getTimerPreset(index)));
-    }
-  };
-  // --- handlere globale pentru butoane optimiste ------------------
+	    // IMPORTANT: Do not auto-initiate the next route here.
+	    // The operator must press "Initiate Contest" for the new route, which sends INIT_ROUTE
+	    // and unlocks Judge Remote / ContestPage controls for that route.
+
+	    // Clear the last known climber so "Start/Insert" stays clearly inactive until initiation.
+	    setCurrentClimbers((prev) => ({ ...prev, [index]: '' }));
+	  };
+  // -------------------- Timer controls (optimistic UI + stale retry) --------------------
+  // We update the UI immediately, then send the command to the backend.
+  // If the backend responds with `ignored` (usually `stale_version`), we resync `/api/state/{boxId}` and retry once.
   const handleClickStart = async (boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     setTimerStates((prev) => ({ ...prev, [boxIdx]: 'running' }));
@@ -1673,6 +1750,8 @@ const ControlPanel: FC = () => {
     }
   };
 
+  // -------------------- Progress controls (+1 / +0.1 holds) --------------------
+  // Clamp to `holdsCount` and retry once on backend `ignored` responses.
   const handleClickHold = async (boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     try {
@@ -1726,6 +1805,7 @@ const ControlPanel: FC = () => {
     }
   };
 
+  // Half-hold action (+0.1) used for routes with fractional scoring.
   const handleHalfHoldClick = async (boxIdx: number): Promise<void> => {
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx)); // TASK 3.1: Set loading
     try {
@@ -1779,6 +1859,10 @@ const ControlPanel: FC = () => {
     }
   };
 
+  // Persist a per-box, per-route scoring history to localStorage.
+  // This powers:
+  // - Rankings generation/export without requiring ContestPage to be open
+  // - Award ceremony offline fallback (podium-${boxId})
   const persistRankingEntry = (
     boxIdx: number,
     competitor: string,
@@ -1802,6 +1886,7 @@ const ControlPanel: FC = () => {
     safeSetJSON(`rankingTimes-${boxIdx}`, times);
   };
 
+  // Mark a competitor as "scored" in the listbox UI (e.g. colored underline/indicator).
   const markCompetitorInListboxes = (boxIdx: number, competitor: string): void => {
     const target = normalizeCompetitorKey(competitor);
     if (!target) return;
@@ -1821,6 +1906,8 @@ const ControlPanel: FC = () => {
     );
   };
 
+  // Submit a score for the current competitor in a box.
+  // If the current competitor isn't known locally, we fetch `/api/state/{boxId}` first as a fallback.
   const handleScoreSubmit = async (
     score: number,
     boxIdx: number,
@@ -1866,12 +1953,12 @@ const ControlPanel: FC = () => {
       const raw = safeGetItem(`registeredTime-${boxIdx}`);
       const parsed = parseInt(raw, 10);
       if (!Number.isNaN(parsed)) return parsed;
-      // Fallback: calculează automat pe baza timerului curent
+      // Fallback: compute elapsed time from the current timer value.
       const current = readCurrentTimerSec(boxIdx);
       if (typeof current === 'number') {
         const total = defaultTimerSec(boxIdx);
         const elapsed = Math.max(0, total - current);
-        // salvează pentru consistență locală
+        // Persist for local consistency (refresh/resync).
         safeSetItem(`registeredTime-${boxIdx}`, elapsed.toString());
         setRegisteredTimes((prev) => ({ ...prev, [boxIdx]: elapsed }));
         return elapsed;
@@ -1939,6 +2026,7 @@ const ControlPanel: FC = () => {
     }
   };
 
+  // Build the list of already-scored competitors (and their cached scores/times) for the "Modify score" modal.
   const buildEditLists = (boxIdx: number): {
     comp: string[];
     scores: Record<string, number>;
@@ -1972,6 +2060,8 @@ const ControlPanel: FC = () => {
     }
     return { comp, scores, times };
   };
+
+  // Show a short-lived per-box status message (used for ranking/export operations).
   const showRankingStatus = (boxIdx: number, message: string, type: 'info' | 'error' = 'info') => {
     setRankingStatus((prev) => ({ ...prev, [boxIdx]: { message, type } }));
     setTimeout(() => {
@@ -1982,6 +2072,8 @@ const ControlPanel: FC = () => {
       });
     }, 3000);
   };
+
+  // Ask the backend to generate rankings for this box using the locally cached per-route scores (and optional times).
   const handleGenerateRankings = async (boxIdx: number): Promise<void> => {
     const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
     if (!box) return;
@@ -2012,8 +2104,15 @@ const ControlPanel: FC = () => {
       showRankingStatus(boxIdx, 'Failed to generate rankings', 'error');
     }
   };
+
+  // -------------------- Award ceremony (podium) helpers --------------------
+  // Ceremony needs a top-3 list. We can source it from:
+  // - Explicit winners provided by the caller (e.g. API podium response)
+  // - Local offline computation using cached `ranking-${boxId}` history (fallback)
   type CeremonyWinner = { name: string; color: string; club?: string };
 
+  // A box is "finalized" when we are on the last route AND every competitor is marked/scored.
+  // Used to prevent award ceremony from running before results are known.
   const isContestFinalized = (boxIdx: number): boolean => {
     const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
     if (!box || !Array.isArray(box.concurenti) || box.concurenti.length === 0) return false;
@@ -2023,6 +2122,7 @@ const ControlPanel: FC = () => {
     return routeIndex === routesCount && allMarked;
   };
 
+  // Defensive parsing/normalization for ceremony winners coming from API/localStorage/postMessage.
   const normalizeCeremonyWinners = (input: unknown): CeremonyWinner[] => {
     if (!Array.isArray(input)) return [];
     return input
@@ -2036,6 +2136,7 @@ const ControlPanel: FC = () => {
       .slice(0, 3);
   };
 
+  // Convert per-route scores into "rank points" (1 = best) with proper tie handling.
   const calcRankPointsPerRoute = (
     scoresByName: Record<string, Array<number | undefined>>,
     nRoutes: number,
@@ -2081,6 +2182,7 @@ const ControlPanel: FC = () => {
     return { rankPoints, nCompetitors };
   };
 
+  // Compute a geometric mean across routes (missing routes are penalized as "worse than last").
   const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: number): number => {
     const filled = arr.map((v) => v ?? nCompetitors + 1);
     while (filled.length < nRoutes) filled.push(nCompetitors + 1);
@@ -2088,6 +2190,9 @@ const ControlPanel: FC = () => {
     return Number(Math.pow(prod, 1 / nRoutes).toFixed(3));
   };
 
+  // Offline podium computation:
+  // - Prefer cached `ranking-${boxId}` history
+  // - Otherwise fall back to persisted `podium-${boxId}` (if any)
   const computeLocalPodiumForBox = (boxIdx: number): CeremonyWinner[] => {
     const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
     const nRoutes = Math.max(1, Number(box?.routesCount) || 1);
@@ -2148,6 +2253,7 @@ const ControlPanel: FC = () => {
     return podium;
   };
 
+  // Open `ceremony.html` in a new tab and pass winners via `postMessage` (reliable) + legacy window property.
   const handleCeremony = (boxId: number, category: string, winners?: CeremonyWinner[]): void => {
     // Open the ceremony window immediately on click
     const url = `/ceremony.html?boxId=${encodeURIComponent(String(boxId))}&cat=${encodeURIComponent(
@@ -2183,6 +2289,7 @@ const ControlPanel: FC = () => {
     } catch {}
   };
 
+  // Open the Judge QR modal for a given box (URL includes boxId + category).
   const openQrDialog = (boxIdx: number): void => {
     const box = listboxes[boxIdx];
     if (!box) return;
@@ -2191,12 +2298,14 @@ const ControlPanel: FC = () => {
     setShowQrDialog(true);
   };
 
+  // Open the Public QR modal (public hub entry point).
   const openPublicQrDialog = (): void => {
     const url = buildPublicHubUrl();
     setPublicQrUrl(url);
     setShowPublicQrDialog(true);
   };
 
+  // Open the "Set judge password" modal for a given box (admin only).
   const openSetJudgePasswordDialog = (boxIdx: number): void => {
     const box = listboxes[boxIdx];
     if (!box) return;
@@ -2213,6 +2322,9 @@ const ControlPanel: FC = () => {
     setShowSetPasswordDialog(true);
   };
 
+  // Open the officials modal:
+  // - per-route routesetter names (per box)
+  // - global officials (chief judge / director / chief routesetter)
   const openRoutesetterDialog = (boxId: number | null): void => {
     if (boxId == null || listboxes.length === 0) return;
     const box = listboxes[boxId];
@@ -2257,6 +2369,9 @@ const ControlPanel: FC = () => {
     })();
   };
 
+  // Persist officials from the modal:
+  // - Routesetters are stored locally per route
+  // - Global officials are synced to backend (best-effort)
   const saveRoutesetter = async (): Promise<void> => {
     if (routesetterBoxId == null) {
       setRoutesetterDialogError('Select a category.');
@@ -2366,6 +2481,7 @@ const ControlPanel: FC = () => {
   };
 
 
+  // Admin action: open the "Modify score" modal for the selected scoring box.
   const openModifyScoreFromAdmin = (): void => {
     if (scoringBoxId == null) return;
     const { comp, scores, times } = buildEditLists(scoringBoxId);
@@ -2375,6 +2491,7 @@ const ControlPanel: FC = () => {
     setShowModifyModal(true);
   };
 
+  // Admin action: open JudgePage for the selected box (new tab).
   const openJudgeViewFromAdmin = (): void => {
     if (judgeAccessBoxId == null) return;
     const box = listboxes[judgeAccessBoxId];
@@ -2382,6 +2499,8 @@ const ControlPanel: FC = () => {
     window.open(buildJudgeUrl(judgeAccessBoxId, box.categorie), '_blank');
   };
 
+  // Admin action: open Award Ceremony for the selected box/category.
+  // Gated by `isContestFinalized()` so we don't show winners before results are complete.
   const openCeremonyFromAdmin = (): void => {
     if (scoringBoxId == null) return;
     const box = listboxes[scoringBoxId];
@@ -2403,6 +2522,7 @@ const ControlPanel: FC = () => {
     handleCeremony(scoringBoxId, category, localPodium);
   };
 
+  // Copy the judge QR URL to clipboard (with a legacy fallback).
   const handleCopyQrUrl = async (): Promise<void> => {
     if (!adminQrUrl) return;
     try {
@@ -2429,6 +2549,7 @@ const ControlPanel: FC = () => {
     window.prompt('Copy the public URL:', publicQrUrl);
   };
 
+  // Validate/normalize a timer preset value to `MM:SS`.
   const normalizeTimerPreset = (value: string): string | null => {
     const match = value.trim().match(/^(\d{1,2}):([0-5]\d)$/);
     if (!match) return null;
@@ -2436,6 +2557,7 @@ const ControlPanel: FC = () => {
     return `${minutes}:${match[2]}`;
   };
 
+  // Open the per-box timer preset modal (prefilled from current box + localStorage).
   const openBoxTimerDialog = (boxId: number | null): void => {
     const resolved =
       typeof boxId === 'number'
@@ -2455,6 +2577,7 @@ const ControlPanel: FC = () => {
     setShowBoxTimerDialog(true);
   };
 
+	  // Apply a timer preset locally and (when idle) update the displayed remaining time immediately.
 	  const applyTimerPreset = (boxId: number, preset: string): void => {
 	    setListboxes((prev) =>
 	      prev.map((lb, idx) => (idx === boxId ? { ...lb, timerPreset: preset } : lb)),
@@ -2467,6 +2590,7 @@ const ControlPanel: FC = () => {
 	    }
 	  };
 
+  // Persist the timer preset to backend and propagate time-criterion changes if toggled.
   const saveBoxTimerDialog = async (): Promise<void> => {
     if (timerDialogBoxId == null) {
       setTimerDialogError('Select a box.');
@@ -2478,6 +2602,13 @@ const ControlPanel: FC = () => {
       return;
     }
     applyTimerPreset(timerDialogBoxId, normalized);
+    try {
+      await setTimerPreset(timerDialogBoxId, normalized);
+    } catch (err) {
+      debugError('SET_TIMER_PRESET failed', err);
+      setTimerDialogError('Failed to sync timer preset to server. Check API/login.');
+      return;
+    }
     const currentCriterion = getTimeCriterionEnabled(timerDialogBoxId);
     if (timerDialogCriterion !== currentCriterion) {
       await propagateTimeCriterion(timerDialogBoxId, timerDialogCriterion);
@@ -2485,6 +2616,7 @@ const ControlPanel: FC = () => {
     setShowBoxTimerDialog(false);
   };
 
+  // Admin export: download the official results archive (ZIP).
   const handleExportOfficial = async () => {
     if (showAdminLogin || adminRole !== 'admin') {
       setShowAdminLogin(true);
@@ -2501,6 +2633,7 @@ const ControlPanel: FC = () => {
     }
   };
 
+  // Clear admin auth and show login overlay again.
   const handleAdminLogout = () => {
     clearAuth();
     setAdminRole(null);
@@ -2516,6 +2649,8 @@ const ControlPanel: FC = () => {
     }
   }, [listboxes.length, exportBoxId]);
 
+  // Keep the scoring box selection aligned with the set of initiated boxes.
+  // (Scoring actions only make sense for boxes that were initiated.)
   useEffect(() => {
     const initiatedIds = listboxes
       .map((lb, idx) => (lb.initiated ? idx : null))
@@ -2529,6 +2664,7 @@ const ControlPanel: FC = () => {
     }
   }, [listboxes, scoringBoxId]);
 
+  // Keep the "judge access" selector valid when boxes are added/removed.
   useEffect(() => {
     if (listboxes.length == 0) {
       setJudgeAccessBoxId(null);
@@ -2539,10 +2675,12 @@ const ControlPanel: FC = () => {
     }
   }, [listboxes.length, judgeAccessBoxId]);
 
+  // Read stored role once on mount (role also updates after login).
   useEffect(() => {
     setAdminRole(getStoredRole());
   }, []);
 
+  // -------------------- Derived UI flags --------------------
   const initiatedBoxIds = listboxes.reduce((acc, lb, idx) => {
     if (lb.initiated) acc.push(idx);
     return acc;
@@ -2571,19 +2709,22 @@ const ControlPanel: FC = () => {
 
   return (
     <div className={styles.container}>
+      {/* Admin auth overlay (blocks admin-only actions when not logged in). */}
       {showAdminLogin && (
         <LoginOverlay
-          title="Autentificare admin"
+          title="Admin Authentication"
           onSuccess={() => {
             setAdminRole(getStoredRole());
             setShowAdminLogin(false);
           }}
         />
       )}
+      {/* Page header (ControlPanel branding + short description). */}
       <div className={styles.header}>
         <h1 className={styles.title}>🎯 Control Panel</h1>
         <p className={styles.subtitle}>Manage competitions in real-time</p>
       </div>
+      {/* Admin panel: navigation sidebar + the active admin tool view (Upload/Actions/Export/Audit). */}
       <section className={styles.adminBar}>
         <div className="flex items-center justify-between mb-md">
           <div>
@@ -2875,7 +3016,8 @@ const ControlPanel: FC = () => {
           </div>
         </section>
 
-      {/* Modals */}
+      {/* Global modals used by Admin tools and box cards. */}
+      {/* Modify score modal: manual adjustments after a score was submitted. */}
       <ModalModifyScore
         isOpen={showModifyModal && editList.length > 0}
         competitors={editList}
@@ -2895,6 +3037,7 @@ const ControlPanel: FC = () => {
         }}
       />
 
+	      {/* Judge QR modal: share the judge-remote URL for the selected box. */}
 	      {showQrDialog && (
 	        <div className={styles.modalOverlay}>
 	          <div className={styles.modalCard}>
@@ -2939,6 +3082,7 @@ const ControlPanel: FC = () => {
         </div>
       )}
 
+        {/* Public QR modal: share the public hub URL for spectators (read-only). */}
         {showPublicQrDialog && (
           <div className={styles.modalOverlay}>
             <div className={styles.modalCard}>
@@ -2983,8 +3127,9 @@ const ControlPanel: FC = () => {
               </div>
             </div>
           </div>
-        )}
+      )}
 
+	      {/* Judge password modal: set/update the judge credentials for a box (admin only). */}
 	      {showSetPasswordDialog && (
 	        <div className={styles.modalOverlay}>
 	          <div className={styles.modalCard}>
@@ -3053,8 +3198,9 @@ const ControlPanel: FC = () => {
             </div>
           </div>
         </div>
-      )}
+	      )}
 
+	      {/* Officials modal: per-route routesetters + global officials (chief judge/director/chief routesetter). */}
 		      {showRoutesetterDialog && (
 		        <div className={styles.modalOverlay}>
 		          <div className={styles.modalCard}>
@@ -3172,6 +3318,7 @@ const ControlPanel: FC = () => {
 	        </div>
 	      )}
 
+	      {/* Timer preset modal: set per-box duration preset + time-criterion toggle (tiebreak). */}
 	      {showBoxTimerDialog && (
 	        <div className={styles.modalOverlay}>
 	          <div className={styles.modalCard}>
@@ -3234,6 +3381,7 @@ const ControlPanel: FC = () => {
         </div>
       )}
 
+      {/* Reset dialog: allows partial reset (timer/progress/unmark/close tab) with explicit checkboxes. */}
       {showResetDialog && (
         <div className={styles.modalOverlay}>
           <div className={styles.modalCard}>
@@ -3336,6 +3484,7 @@ const ControlPanel: FC = () => {
         </div>
       )}
 
+      {/* Boxes grid: one card per box/category (initiate, open ContestPage, timer/progress/score controls). */}
       <div className={styles.boxesGrid}>
 	        {listboxes.map((lb, idx) => {
 	          const timerState = timerStates[idx] || 'idle';
@@ -3343,6 +3492,10 @@ const ControlPanel: FC = () => {
 	          const isPaused = timerState === 'paused';
 	          const statusClass = isRunning ? 'running' : isPaused ? 'paused' : 'idle';
 	          const activeKey = normalizeCompetitorKey(currentClimbers[idx] || '');
+	          // When all competitors are marked, the current route is effectively complete (no one left to climb).
+	          // In that state we must not allow starting the timer or opening score submission.
+	          const hasRemainingCompetitor =
+	            Array.isArray(lb?.concurenti) && lb.concurenti.some((c) => !c?.marked);
 	          const presetSec = defaultTimerSec(idx);
 	          const remainingSec = readCurrentTimerSec(idx);
 	          const hasActiveRemaining =
@@ -3424,7 +3577,7 @@ const ControlPanel: FC = () => {
                   <button
                     className={`modern-btn modern-btn-primary btn-press-effect ${loadingBoxes.has(idx) ? 'loading' : ''}`}
                     onClick={() => handleClickStart(idx)}
-                    disabled={!lb.initiated || loadingBoxes.has(idx)}
+                    disabled={!lb.initiated || !hasRemainingCompetitor || loadingBoxes.has(idx)}
                   >
                     {loadingBoxes.has(idx) ? (
                       <>
@@ -3571,7 +3724,7 @@ const ControlPanel: FC = () => {
                       }
                     })();
                   }}
-                  disabled={!lb.initiated}
+                  disabled={!lb.initiated || !hasRemainingCompetitor}
                 >
                   📊 Insert Score
                 </button>

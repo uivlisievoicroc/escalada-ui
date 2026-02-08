@@ -1,10 +1,18 @@
 <!DOCTYPE html>
+<!--
+  Award Ceremony (offline)
+  - Opens in a separate tab from ControlPanel (Admin → Actions → Scoring → Award ceremony)
+  - Manual progression with Space key (no autoplay)
+  - Works without internet (no CDN / external fonts / external scripts)
+  - Winners are provided via postMessage, with robust fallbacks (localStorage → window → opener)
+-->
 <html lang="ro">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Award Ceremony</title>
 <style>
+  /* -------------------- Design tokens -------------------- */
   :root{
     --bg0:#070a11;
     --bg1:#0b1220;
@@ -13,6 +21,8 @@
     --card:rgba(255,255,255,.06);
     --border:rgba(255,255,255,.12);
   }
+
+  /* -------------------- Page shell (full-screen, no scroll) -------------------- */
   html,body{
     margin:0;
     height:100%;
@@ -24,6 +34,8 @@
     color:var(--text);
     font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   }
+
+  /* -------------------- Header (title + category) -------------------- */
   #header{
     position:fixed;
     top:0;
@@ -48,6 +60,8 @@
     font-weight:700;
     color:var(--muted);
   }
+
+  /* -------------------- Status pill (transient guidance/errors) -------------------- */
   #status{
     position:fixed;
     top:18px;
@@ -64,6 +78,7 @@
   }
   #status.hidden{opacity:0; visibility:hidden;}
 
+  /* -------------------- Confetti canvas (place I only) -------------------- */
   #confetti{
     position:fixed;
     inset:0;
@@ -71,6 +86,8 @@
     pointer-events:none;
   }
 
+  /* -------------------- Podium layout -------------------- */
+  /* DOM order is 2,1,3 so that place I stays centered visually. */
   #podium{
     position:absolute;
     top:50%;
@@ -95,6 +112,8 @@
     transition: filter 220ms ease;
   }
   .spot.filled{filter:brightness(1.05);}
+
+  /* Text inside each podium step (hidden until filled). */
   .spotText{
     max-width:100%;
     padding:18px 18px;
@@ -136,6 +155,8 @@
     opacity:1;
     transform:translateY(0);
   }
+
+  /* Roman numerals below each step (I / II / III). */
   .spot::after{
     content:attr(data-place);
     position:absolute;
@@ -159,10 +180,13 @@
     text-align:center;
     box-shadow: 0 10px 28px rgba(0,0,0,.25);
   }
+
+  /* Podium colors per place. */
   #place3{background:#cd7f32;height:29vh}
   #place2{background:#c0c0c0;height:36vh}
   #place1{background:#ffd700;height:45vh}
 
+  /* -------------------- Big reveal name (center -> move to podium step) -------------------- */
   #bigName{
     position:absolute;
     top:40%;
@@ -216,6 +240,8 @@
     word-break:break-word;
     line-height:0.98;
   }
+
+  /* Pulse while the name is showcased in the center (duration controlled in JS). */
   #bigName.pulse #bigNameText{
     animation:pulse 420ms ease-in-out infinite alternate;
   }
@@ -226,12 +252,16 @@
 </style>
 </head>
 <body>
+  <!-- Header: page title + selected category (from URL query `cat`). -->
   <div id="header">
     <div id="title">Award Ceremony</div>
     <div id="category"></div>
   </div>
+  <!-- Status: hidden when the ceremony is ready/complete; used for fallback messages. -->
   <div id="status" role="status">Waiting for podium data…</div>
+  <!-- Confetti: on-canvas, offline, no dependencies. -->
   <canvas id="confetti" aria-hidden="true"></canvas>
+  <!-- Podium steps: 2nd (left), 1st (center), 3rd (right). -->
   <div id="podium">
     <div id="place2" class="spot" data-place="II">
       <div class="spotText" aria-label="Second place">
@@ -252,11 +282,13 @@
       </div>
     </div>
   </div>
+  <!-- Big reveal layer: shown in the center and then animated toward the target podium step. -->
   <div id="bigName">
     <span id="bigNameText"></span>
   </div>
 
   <script>
+    // -------------------- DOM handles --------------------
     const statusEl = document.getElementById('status');
     const categoryEl = document.getElementById('category');
     const nameEl = document.getElementById('bigName');
@@ -264,14 +296,18 @@
     const confettiCanvas = document.getElementById('confetti');
     const confettiCtx = confettiCanvas ? confettiCanvas.getContext('2d') : null;
 
+    // -------------------- Query params --------------------
+    // ControlPanel opens: `/ceremony.html?boxId={boxId}&cat={category}`
     const params = new URLSearchParams(window.location.search || '');
     const boxId = params.get('boxId');
     const cat = params.get('cat') || params.get('category') || '';
     categoryEl.textContent = cat ? `Category: ${cat}` : '';
 
+    // Small helper for sequencing animations.
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // ===== Confetti (offline, no deps) =====
+    // Canvas-based particle animation triggered on 1st place reveal.
     let confettiRaf = null;
     let confettiParticles = [];
     let confettiStopAt = 0;
@@ -289,6 +325,7 @@
       '#22d3ee', // cyan
     ];
 
+    // Keep canvas crisp on high-DPI screens by scaling with devicePixelRatio.
     const resizeConfetti = () => {
       if (!confettiCanvas || !confettiCtx) return;
       confettiDpr = Math.min(2, window.devicePixelRatio || 1);
@@ -299,6 +336,7 @@
       confettiCtx.setTransform(confettiDpr, 0, 0, confettiDpr, 0, 0);
     };
 
+    // Spawn particles from an origin (explosion style).
     const spawnConfetti = (count, originX, originY, opts = {}) => {
       const glitter = !!opts.glitter;
       const sizeMult = 2; // requested: bigger confetti
@@ -328,6 +366,7 @@
       }
     };
 
+    // Stop and clear confetti immediately (called on reset).
     const stopConfetti = () => {
       if (confettiRaf != null) cancelAnimationFrame(confettiRaf);
       confettiRaf = null;
@@ -337,6 +376,7 @@
       }
     };
 
+    // Animation loop: advance particles and draw.
     const tickConfetti = (t) => {
       if (!confettiCtx) return;
       if (!confettiLastT) confettiLastT = t;
@@ -393,6 +433,7 @@
       }
     };
 
+    // Start an "explosion" from screen center (used for place I).
     const startConfetti = (durationMs = 2600) => {
       if (!confettiCanvas || !confettiCtx) return;
       resizeConfetti();
@@ -410,6 +451,9 @@
     window.addEventListener('resize', resizeConfetti);
     resizeConfetti();
 
+    // -------------------- Winners ingestion & normalization --------------------
+    // Winners are expected to be an array of up to 3 objects:
+    //   { name: string, club?: string, color?: string }
     const normalizeWinners = (input) => {
       if (!Array.isArray(input)) return [];
       return input
@@ -422,6 +466,8 @@
         .slice(0, 3);
     };
 
+    // Offline fallback: read cached podium from localStorage.
+    // The key may be namespaced (preferred) or legacy (non-namespaced).
     const readLocalPodium = (id) => {
       if (!id) return [];
       const keys = [`escalada_podium-${id}`, `podium-${id}`];
@@ -437,6 +483,7 @@
       return [];
     };
 
+    // Build the ceremony steps in the required order: 3 → 2 → 1.
     const buildSequence = (winners) => {
       const list = normalizeWinners(winners);
       if (list.length >= 3) {
@@ -458,10 +505,12 @@
       return [];
     };
 
+    // -------------------- Ceremony runtime state --------------------
     let sequence = [];
     let step = 0;
     let animating = false;
 
+    // Reset all UI to the initial state (used when new winners arrive).
     const resetVisuals = () => {
       document.querySelectorAll('.spot').forEach((el) => el.classList.remove('filled'));
       document.querySelectorAll('.spotName').forEach((el) => (el.textContent = ''));
@@ -472,6 +521,7 @@
       stopConfetti();
     };
 
+    // Accept winners from any source, rebuild the sequence, and update status.
     const setWinners = (incoming, sourceLabel) => {
       sequence = buildSequence(incoming);
       step = 0;
@@ -487,6 +537,7 @@
       statusEl.textContent = `Ready (${sourceLabel}).`;
     };
 
+    // Advance one step (manual): show big name, pulse, move to podium, persist text in the target box.
     const revealNext = async () => {
       if (!sequence.length) return;
       if (animating) return;
@@ -502,6 +553,11 @@
       statusEl.classList.remove('hidden');
       statusEl.textContent = entry.label;
 
+      if (!spot) {
+        animating = false;
+        return;
+      }
+
       // Set name
       nameTextEl.textContent = entry.winner.name;
       nameEl.style.color = entry.winner.color;
@@ -516,11 +572,11 @@
         startConfetti(3200);
       }
 
-      // Hold/pulse a bit
+      // Hold/pulse in the center before moving to the podium step.
       await wait(3200);
       nameEl.classList.remove('pulse');
 
-      // Compute translation from viewport center to spot center
+      // Compute translation from the current bigName center to the target podium step center.
       const spotRect = spot.getBoundingClientRect();
       const fromRect = nameEl.getBoundingClientRect();
       const fromX = fromRect.left + fromRect.width / 2;
@@ -533,7 +589,7 @@
       nameEl.style.setProperty('--ty', `${dy}px`);
       nameEl.classList.add('move');
 
-      // Let the move animation finish
+      // Let the move animation finish, then "commit" the winner text into the podium step.
       await wait(760);
       const spotNameEl = spot.querySelector('.spotName');
       if (spotNameEl) {
@@ -545,7 +601,7 @@
       }
       spot.classList.add('filled');
 
-      // Hide
+      // Hide the bigName layer (the winner remains visible inside the podium step).
       nameEl.classList.add('out');
       await wait(280);
       nameEl.classList.remove('visible', 'move', 'out');
@@ -557,7 +613,8 @@
       }
     };
 
-    // Prefer postMessage from ControlPanel.
+    // -------------------- Data passing: postMessage from ControlPanel --------------------
+    // This is the primary/most reliable data channel (works even if localStorage is empty).
     window.addEventListener('message', (e) => {
       try {
         const sameOrigin = window.location.origin === 'null' || e.origin === window.location.origin;
@@ -570,14 +627,19 @@
       }
     });
 
-    // Manual control: Space key.
+    // -------------------- Manual control (Space) --------------------
+    // Press Space to reveal the next step. We ignore key repeats while an animation is running.
     document.addEventListener('keydown', (e) => {
       if (e.code !== 'Space') return;
       e.preventDefault();
       void revealNext();
     });
 
-    // Bootstrap fallback sources (localStorage -> opener/window vars).
+    // -------------------- Bootstrap: robust winner discovery --------------------
+    // Fallback order:
+    // 1) localStorage `escalada_podium-${boxId}` / `podium-${boxId}` (offline friendly)
+    // 2) `window.ceremonyWinners` (set directly by ControlPanel)
+    // 3) `window.opener.ceremonyWinners` (legacy best-effort)
     (() => {
       statusEl.textContent = 'Waiting for podium data…';
 
