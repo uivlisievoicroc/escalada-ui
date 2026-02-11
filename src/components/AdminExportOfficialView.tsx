@@ -1,6 +1,8 @@
 import React from 'react';
 import type { Box } from '../types';
 import { sanitizeBoxName } from '../utilis/sanitize';
+import controlPanelStyles from './ControlPanel.module.css';
+import styles from './AdminExportOfficialView.module.css';
 
 /**
  * AdminExportOfficialView - UI for exporting official contest results as ZIP bundle.
@@ -48,62 +50,55 @@ const AdminExportOfficialView: React.FC<AdminExportOfficialViewProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Instruction text explaining export functionality */}
-      <div className="text-sm text-slate-600">
-        Export official results as a ZIP bundle for a single box.
-      </div>
+      {/* Match Admin/Actions card sizing by using the same 3-column grid container. */}
+      <div className="grid grid-cols-[repeat(3,minmax(260px,1fr))] gap-3 overflow-x-auto">
+        <div className={controlPanelStyles.adminCard}>
+          <div className={controlPanelStyles.adminCardTitle}>Export</div>
 
-      {/* Box selection card with dropdown and preview */}
-      <div className="border border-slate-200 rounded-lg p-4 space-y-3 bg-white">
-        {/* Dropdown to select which box to export */}
-        <label className="text-sm">
-          Select box
-          <select
-            className="mt-1 w-full border border-slate-300 rounded px-2 py-1"
-            value={exportBoxId}
-            onChange={(e) => onChangeExportBoxId(Number(e.target.value))}
-            disabled={!hasBoxes} // Disable if no boxes available
-          >
-            {hasBoxes ? (
-              // Show all boxes with index and sanitized category name
-              listboxes.map((b, idx) => (
-                <option key={idx} value={idx}>
-                  {idx} — {sanitizeBoxName(b.categorie || `Box ${idx}`)}
-                </option>
-              ))
-            ) : (
-              // Fallback option when no boxes exist
-              <option value={0}>No boxes available</option>
-            )}
-          </select>
-        </label>
+          <label className={controlPanelStyles.modalField}>
+            <span className={controlPanelStyles.modalLabel}>Select category</span>
+            <select
+              className={controlPanelStyles.modalSelect}
+              value={exportBoxId}
+              onChange={(e) => onChangeExportBoxId(Number(e.target.value))}
+              disabled={!hasBoxes}
+            >
+              {hasBoxes ? (
+                listboxes.map((b, idx) => (
+                  <option key={idx} value={idx}>
+                    {sanitizeBoxName(b.categorie || `Box ${idx}`)}
+                  </option>
+                ))
+              ) : (
+                <option value={0}>No boxes available</option>
+              )}
+            </select>
+          </label>
 
-        {/* Preview of selected box details (only shown when a box is selected) */}
-        {selectedBox && (
-          <div className="text-xs text-slate-500">
-            {/* Category name (sanitized to prevent XSS) */}
-            <div className="font-semibold text-slate-700">
-              {sanitizeBoxName(selectedBox.categorie || `Box ${exportBoxId}`)}
+          {selectedBox && (
+            <div className={styles.preview}>
+              <div className={styles.previewTitle}>
+                {sanitizeBoxName(selectedBox.categorie || `Box ${exportBoxId}`)}
+              </div>
+              <div>
+                Routes: {selectedBox.routeIndex}/{selectedBox.routesCount}
+              </div>
+              <div>Competitors: {selectedBox.concurenti?.length ?? 0}</div>
             </div>
-            {/* Route progress (current/total) */}
-            <div>
-              Routes: {selectedBox.routeIndex}/{selectedBox.routesCount}
-            </div>
-            {/* Competitor count (with fallback for undefined) */}
-            <div>Competitors: {selectedBox.concurenti?.length ?? 0}</div>
+          )}
+
+          <div className="flex flex-col gap-2 mt-3">
+            <button
+              className="modern-btn modern-btn-primary"
+              onClick={onExport}
+              disabled={!hasBoxes}
+              type="button"
+            >
+              Export official (ZIP)
+            </button>
           </div>
-        )}
+        </div>
       </div>
-
-      {/* Export button: triggers parent's onExport callback (API call to backend) */}
-      <button
-        className="px-3 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50"
-        onClick={onExport}
-        disabled={!hasBoxes} // Disable if no boxes to export
-        type="button"
-      >
-        Export official (ZIP)
-      </button>
     </div>
   );
 };

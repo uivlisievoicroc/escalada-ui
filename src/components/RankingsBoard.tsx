@@ -538,119 +538,12 @@ const RankingsBoard: FC<RankingsBoardProps> = ({ boxes, selectedBoxId, setSelect
   // Global start index for zebra striping
   const pageStartIndex = isMobile ? 0 : pageIndex * rowsPerPage;
 
-  /**
-   * MiniCard - Reusable Info Card Component
-   *
-   * Purpose:
-   * - Displays label + value in compact card format
-   * - Optional right element (badge, icon, metadata)
-   * - Used for category, current climber, route info
-   */
-  const MiniCard: FC<{ label: string; value: React.ReactNode; right?: React.ReactNode }> = ({
-    label,
-    value,
-    right,
-  }) => (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-3 py-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-[10px] uppercase tracking-wider text-slate-400">{label}</div>
-        {right}
-      </div>
-      <div className="mt-1 text-sm font-semibold text-slate-50">{value}</div>
-    </div>
-  );
-
-  // Render: Main layout with box selector and rankings table
+  // Render: Standings + initiated categories selector (under standings)
   return (
     <>
-      {/* Box selector section - Horizontal scrolling list of initiated boxes */}
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/35 px-3 py-2">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Initiated categories
-          </div>
-          <div className="text-xs text-slate-500">{initiatedBoxes.length} active</div>
-        </div>
-        {initiatedBoxes.length === 0 ? (
-          <div className="mt-2 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-sm text-slate-300">
-            No initiated categories yet.
-          </div>
-        ) : (
-          <div className="mt-2 flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            {initiatedBoxes.map((box) => {
-              const active = selectedBoxId === box.boxId;
-              return (
-                <button
-                  key={box.boxId}
-                  type="button"
-                  onClick={() => setSelectedBoxId(box.boxId)}
-                  className={`whitespace-nowrap rounded-full border px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
-                    active
-                      ? 'border-cyan-400/40 bg-cyan-500/15 text-cyan-100 shadow-[0_0_24px_rgba(34,211,238,0.12)]'
-                      : 'border-slate-800 bg-slate-950/20 text-slate-200 hover:bg-slate-900/50'
-                  }`}
-                >
-                  {sanitizeBoxName(box.categorie || `Box ${box.boxId}`)}
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </section>
-
-      {/* Main content area - Only shown if box selected */}
-      {selectedBox ? (
-        <main className="flex min-h-0 flex-1 flex-col gap-3 md:grid md:grid-cols-[360px_1fr] md:gap-4">
-          {/* Sidebar - Info cards (category, current climber, route) */}
-          <aside className="flex flex-col gap-3 md:min-h-0">
-            <div className="grid grid-cols-3 gap-2">
-              {/* Category card */}
-              <MiniCard
-                label="Category"
-                right={
-                  <span className="text-[10px] text-slate-500 font-mono">#{selectedBox.boxId}</span>
-                }
-                value={
-                  <span
-                    className="block truncate"
-                    title={sanitizeBoxName(selectedBox.categorie || `Box ${selectedBox.boxId}`)}
-                  >
-                    {sanitizeBoxName(selectedBox.categorie || `Box ${selectedBox.boxId}`)}
-                  </span>
-                }
-              />
-              {/* Current climber card */}
-              <MiniCard
-                label="Current"
-                value={
-                  <span
-                    className="block truncate"
-                    title={sanitizeCompetitorName(selectedBox.currentClimber || '—')}
-                  >
-                    {sanitizeCompetitorName(selectedBox.currentClimber || '—')}
-                  </span>
-                }
-              />
-              {/* Route card */}
-              <MiniCard
-                label="Route"
-                right={
-                  <span className="text-[10px] text-slate-500">
-                    {selectedBox.timeCriterionEnabled ? 'Time ON' : 'Time OFF'}
-                  </span>
-                }
-                value={
-                  <span className="font-mono text-lg tracking-tight md:text-2xl">
-                    {selectedBox.routeIndex}
-                    <span className="text-slate-500">/</span>
-                    {selectedBox.routesCount || totalRoutes}
-                  </span>
-                }
-              />
-            </div>
-          </aside>
-
-          {/* Rankings table section */}
+      <main className="flex min-h-0 flex-1 flex-col gap-3 md:gap-4">
+        {/* Standings (hidden until a box is selected) */}
+        {selectedBox && (
           <section className="min-h-0 rounded-2xl border border-slate-800 bg-slate-900/35 p-3 md:p-4">
             {/* Table header - Title + pagination info */}
             <div className="mb-3 flex items-end justify-between gap-3">
@@ -802,16 +695,45 @@ const RankingsBoard: FC<RankingsBoardProps> = ({ boxes, selectedBoxId, setSelect
               </div>
             </div>
           </section>
-        </main>
-      ) : (
-        // Empty state - No box selected
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/35 p-4">
-          <div className="text-sm text-slate-300">No initiated categories yet.</div>
+        )}
+
+        {/* Initiated categories selector (moved under Standings) */}
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/35 px-3 py-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Initiated categories
+            </div>
+            <div className="text-xs text-slate-500">{initiatedBoxes.length} active</div>
+          </div>
+          {initiatedBoxes.length === 0 ? (
+            <div className="mt-2 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-sm text-slate-300">
+              No initiated categories yet.
+            </div>
+          ) : (
+            <div className="mt-2 flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {initiatedBoxes.map((box) => {
+                const active = selectedBoxId === box.boxId;
+                return (
+                  <button
+                    key={box.boxId}
+                    type="button"
+                    onClick={() => setSelectedBoxId(box.boxId)}
+                    className={`whitespace-nowrap rounded-full border px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
+                      active
+                        ? 'border-cyan-400/40 bg-cyan-500/15 text-cyan-100 shadow-[0_0_24px_rgba(34,211,238,0.12)]'
+                        : 'border-slate-800 bg-slate-950/20 text-slate-200 hover:bg-slate-900/50'
+                    }`}
+                  >
+                    {sanitizeBoxName(box.categorie || `Box ${box.boxId}`)}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </section>
-      )}
+      </main>
     </>
   );
 };
 
 export default RankingsBoard;
-

@@ -23,7 +23,6 @@ try {
     }
   } else {
     // Else polyfill using whatwg-fetch if available
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     require('whatwg-fetch');
   }
 } catch (_) {
@@ -33,12 +32,10 @@ try {
 // URL and URLSearchParams (fallback to Node implementations if missing)
 try {
   if (typeof globalThis.URL === 'undefined') {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { URL } = require('url');
     globalThis.URL = URL;
   }
   if (typeof globalThis.URLSearchParams === 'undefined') {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { URLSearchParams } = require('url');
     globalThis.URLSearchParams = URLSearchParams;
   }
@@ -50,7 +47,6 @@ try {
     typeof globalThis.TextEncoder === 'undefined' ||
     typeof globalThis.TextDecoder === 'undefined'
   ) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { TextEncoder, TextDecoder } = require('util');
     if (typeof globalThis.TextEncoder === 'undefined') globalThis.TextEncoder = TextEncoder;
     if (typeof globalThis.TextDecoder === 'undefined') globalThis.TextDecoder = TextDecoder;
@@ -63,7 +59,6 @@ try {
     typeof globalThis.crypto === 'undefined' ||
     typeof globalThis.crypto.getRandomValues !== 'function'
   ) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const nodeCrypto = require('crypto');
     globalThis.crypto = {
       // Delegate to Node's secure random

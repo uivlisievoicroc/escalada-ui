@@ -51,8 +51,13 @@ export const normalizeCompetitorKey = (name) => {
   if (!trimmed) return '';
 
   // Remove dangerous characters (keep Unicode letters/diacritics intact).
-  const withoutDangerous = trimmed.replace(/[<>{}\[\]\\|;()&$`"*]/g, '');
-  // Remove ASCII control chars.
-  const withoutControl = withoutDangerous.replace(/[\x00-\x1f\x7f]/g, '');
+  const withoutDangerous = trimmed.replace(/[<>{}[\]\\|;()&$`"*]/g, '');
+  // Remove ASCII control chars without a control-char regex (keeps eslint rule happy).
+  const withoutControl = [...withoutDangerous]
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code >= 32 && code !== 127;
+    })
+    .join('');
   return withoutControl.trim();
 };

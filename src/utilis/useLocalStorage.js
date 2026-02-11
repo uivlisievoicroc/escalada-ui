@@ -71,7 +71,7 @@ export function useLocalStorageWithRemove(key, initialValue) {
     } catch (error) {
       debugError(`Error removing localStorage key "${key}":`, error);
     }
-  }, [key, initialValue]);
+  }, [key, initialValue, setValue]);
 
   return [value, setValue, removeValue];
 }

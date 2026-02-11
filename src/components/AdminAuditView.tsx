@@ -4,6 +4,8 @@ import { clearAuth, getStoredRole, getStoredToken } from '../utilis/auth';
 import { fetchAuditEvents } from '../utilis/audit';
 import { debugError } from '../utilis/debug';
 import LoginOverlay from './LoginOverlay';
+import controlPanelStyles from './ControlPanel.module.css';
+import styles from './AdminAuditView.module.css';
 
 type AuditEvent = {
   id: string;
@@ -89,12 +91,15 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
         />
       )}
 
-      <div className="flex items-center justify-between gap-2 mb-4">
-        <h1 className="text-2xl font-bold">Audit viewer (admin)</h1>
-        <div className="flex gap-2">
+      <div className={styles.header}>
+        <div className={styles.titleBlock}>
+          <div className={styles.title}>Audit</div>
+          <div className={styles.subtitle}>Evenimente admin (read-only)</div>
+        </div>
+        <div className={styles.actions}>
           {showOpenFullPage && (
             <Link
-              className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+              className="modern-btn modern-btn-ghost modern-btn-sm"
               to="/admin/audit"
             >
               Open full page
@@ -102,7 +107,7 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
           )}
           {showLogout && (
             <button
-              className="px-3 py-2 bg-gray-200 rounded hover:bg-gray-300"
+              className="modern-btn modern-btn-ghost modern-btn-sm"
               type="button"
               onClick={() => {
                 clearAuth();
@@ -115,28 +120,28 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
             </button>
           )}
           {showBackLink && (
-            <Link className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700" to="/">
+            <Link className="modern-btn modern-btn-primary modern-btn-sm" to="/">
               Înapoi
             </Link>
           )}
         </div>
       </div>
 
-      <div className="p-3 border border-gray-200 rounded bg-white">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          <label className="text-sm">
-            BoxId (gol = toate)
+      <div className={controlPanelStyles.adminCard}>
+        <div className={styles.controlsGrid}>
+          <label className={controlPanelStyles.modalField}>
+            <span className={controlPanelStyles.modalLabel}>BoxId (gol = toate)</span>
             <input
-              className="mt-1 w-full border border-gray-300 rounded px-2 py-1"
+              className={controlPanelStyles.modalInput}
               value={boxId}
               onChange={(e) => setBoxId(e.target.value)}
               placeholder="ex: 1"
             />
           </label>
-          <label className="text-sm">
-            Limit
+          <label className={controlPanelStyles.modalField}>
+            <span className={controlPanelStyles.modalLabel}>Limit</span>
             <input
-              className="mt-1 w-full border border-gray-300 rounded px-2 py-1"
+              className={controlPanelStyles.modalInput}
               type="number"
               min={1}
               max={2000}
@@ -144,7 +149,7 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
               onChange={(e) => setLimit(Number(e.target.value))}
             />
           </label>
-          <label className="text-sm flex items-center gap-2 mt-6">
+          <label className={styles.checkboxRow}>
             <input
               type="checkbox"
               checked={includePayload}
@@ -152,9 +157,9 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
             />
             Include payload
           </label>
-          <div className="flex items-end">
+          <div>
             <button
-              className="px-3 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50"
+              className="modern-btn modern-btn-primary modern-btn-sm"
               type="button"
               onClick={refresh}
               disabled={loading || showLogin || role !== 'admin'}
@@ -163,37 +168,37 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
             </button>
           </div>
         </div>
-        {error && <div className="mt-3 text-red-600 text-sm">{error}</div>}
+        {error && <div className={styles.errorBox}>{error}</div>}
       </div>
 
-      <div className="mt-4 overflow-x-auto">
-        <table className="min-w-full border border-gray-200 bg-white">
-          <thead className="bg-gray-50">
+      <div className={styles.tableWrap} aria-label="Audit events list">
+        <table className={styles.table}>
+          <thead className={styles.thead}>
             <tr>
-              <th className="text-left text-sm font-semibold p-2 border-b">Time</th>
-              <th className="text-left text-sm font-semibold p-2 border-b">Box</th>
-              <th className="text-left text-sm font-semibold p-2 border-b">Action</th>
-              <th className="text-left text-sm font-semibold p-2 border-b">action_id</th>
-              <th className="text-left text-sm font-semibold p-2 border-b">User</th>
-              <th className="text-left text-sm font-semibold p-2 border-b">Role</th>
-              <th className="text-left text-sm font-semibold p-2 border-b">IP</th>
+              <th>Time</th>
+              <th>Box</th>
+              <th>Action</th>
+              <th>action_id</th>
+              <th>User</th>
+              <th>Role</th>
+              <th>IP</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className={styles.tbody}>
             {events.map((ev) => (
-              <tr key={ev.id} className="odd:bg-white even:bg-gray-50">
-                <td className="text-xs p-2 border-b whitespace-nowrap">{ev.createdAt}</td>
-                <td className="text-sm p-2 border-b">{ev.boxId ?? '-'}</td>
-                <td className="text-sm p-2 border-b">{ev.action}</td>
-                <td className="text-xs p-2 border-b">{ev.actionId ?? '-'}</td>
-                <td className="text-sm p-2 border-b">{ev.actorUsername ?? '-'}</td>
-                <td className="text-sm p-2 border-b">{ev.actorRole ?? '-'}</td>
-                <td className="text-sm p-2 border-b">{ev.actorIp ?? '-'}</td>
+              <tr key={ev.id}>
+                <td className={styles.mono}>{ev.createdAt}</td>
+                <td>{ev.boxId ?? '-'}</td>
+                <td>{ev.action}</td>
+                <td className={styles.mono}>{ev.actionId ?? '-'}</td>
+                <td>{ev.actorUsername ?? '-'}</td>
+                <td>{ev.actorRole ?? '-'}</td>
+                <td>{ev.actorIp ?? '-'}</td>
               </tr>
             ))}
             {!loading && events.length === 0 && (
               <tr>
-                <td className="p-3 text-sm text-gray-600" colSpan={7}>
+                <td className={styles.emptyState} colSpan={7}>
                   Niciun eveniment.
                 </td>
               </tr>

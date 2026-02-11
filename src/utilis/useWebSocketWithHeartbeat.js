@@ -211,11 +211,15 @@ export function useWebSocketWithHeartbeat(url, onMessage) {
         if (state === WebSocket.OPEN) {
           try {
             ws.close();
-          } catch {}
+          } catch {
+            // Ignore close failures during teardown.
+          }
         } else if (state !== WebSocket.CONNECTING && state !== WebSocket.CLOSING && state !== WebSocket.CLOSED) {
           try {
             ws.close();
-          } catch {}
+          } catch {
+            // Ignore close failures during teardown.
+          }
         }
       }
 
@@ -236,7 +240,9 @@ export function useWebSocketWithHeartbeat(url, onMessage) {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         try {
           wsRef.current.close();
-        } catch {}
+        } catch {
+          // Ignore manual reconnect close failures.
+        }
       }
     },
     send: (msg) => {

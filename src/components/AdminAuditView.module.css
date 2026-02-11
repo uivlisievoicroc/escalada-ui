@@ -1,0 +1,137 @@
+/* Audit viewer styling aligned with the ControlPanel "glass + dark" theme. */
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.titleBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.1;
+}
+
+.subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.controlsGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.checkboxRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 22px; /* aligns with input labels */
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.checkboxRow input {
+  width: 16px;
+  height: 16px;
+}
+
+.errorBox {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 51, 102, 0.12);
+  border: 1px solid rgba(255, 51, 102, 0.25);
+  color: var(--accent-danger);
+  font-size: 13px;
+}
+
+.tableWrap {
+  margin-top: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.2);
+
+  /* Show ~10 rows, scroll for the rest. */
+  --audit-header-h: 42px;
+  --audit-row-h: 36px;
+  max-height: calc(var(--audit-header-h) + (10 * var(--audit-row-h)));
+}
+
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: var(--audit-header-h);
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  letter-spacing: 0.35px;
+  text-transform: uppercase;
+  background: rgba(0, 0, 0, 0.65);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+.tbody td {
+  height: var(--audit-row-h);
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  font-size: 13px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.emptyState {
+  padding: 16px 12px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+@media (min-width: 768px) {
+  .controlsGrid {
+    grid-template-columns: 1fr 180px 200px 140px;
+    align-items: end;
+  }
+}
+

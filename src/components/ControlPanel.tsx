@@ -63,10 +63,11 @@ const getApiConfig = () => {
   };
 };
 
-type AdminActionsView = 'actions' | 'upload' | 'export' | 'audit';
+type AdminActionsView = 'actions' | 'public' | 'upload' | 'export' | 'audit';
 
 const ADMIN_VIEW_LABELS: Record<AdminActionsView, string> = {
   actions: 'Actions',
+  public: 'Public View',
   upload: 'Upload',
   export: 'Export',
   audit: 'Audit',
@@ -114,6 +115,16 @@ const ArrowDownTrayIcon: React.FC<IconProps> = (props) => (
       strokeLinecap="round"
       strokeLinejoin="round"
       d="M9 13.5l3 3m0 0l3-3m-3 3V6.75M4.5 18.75h15a2.25 2.25 0 002.25-2.25v-6.75a.75.75 0 10-1.5 0v6.75a.75.75 0 01-.75.75h-15a.75.75 0 01-.75-.75v-6.75a.75.75 0 10-1.5 0v6.75a2.25 2.25 0 002.25 2.25z"
+    />
+  </IconBase>
+);
+
+const GlobeAltIcon: React.FC<IconProps> = (props) => (
+  <IconBase {...props}>
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M12 3c-3.5 0-6.5 2.6-7 6.1m14 0C18.5 5.6 15.5 3 12 3zm-7 6.1a11.8 11.8 0 000 5.8m14-5.8a11.8 11.8 0 010 5.8M5 14.9C5.5 18.4 8.5 21 12 21m7-6.1C18.5 18.4 15.5 21 12 21m0-18c-2 0-3.9 3.2-3.9 9s1.9 9 3.9 9 3.9-3.2 3.9-9S14 3 12 3z"
     />
   </IconBase>
 );
@@ -2817,6 +2828,7 @@ const ControlPanel: FC = () => {
   }[] = [
     { id: 'upload', label: 'Upload', icon: ArrowUpTrayIcon },
     { id: 'actions', label: 'Actions', icon: Squares2X2Icon },
+    { id: 'public', label: 'Public View', icon: GlobeAltIcon },
     { id: 'export', label: 'Export', icon: ArrowDownTrayIcon },
     { id: 'audit', label: 'Audit', icon: ClipboardDocumentListIcon },
   ];
@@ -2906,17 +2918,6 @@ const ControlPanel: FC = () => {
                     );
                   })}
                 </nav>
-
-                <div className="p-2 pt-0">
-                  <button
-                    className="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm transition text-slate-300 hover:bg-white/5 border border-transparent disabled:opacity-50"
-                    onClick={openPublicQrDialog}
-                    disabled={adminRole !== 'admin'}
-                    type="button"
-                  >
-                    Show public QR
-                  </button>
-                </div>
               </div>
             </div>
 
@@ -3010,11 +3011,14 @@ const ControlPanel: FC = () => {
                           <div className="mt-3 flex flex-col gap-2">
                           <button
                             className="modern-btn modern-btn-ghost"
-                            onClick={openJudgeViewFromAdmin}
-                            disabled={!judgeAccessSelected || !judgeAccessBox?.initiated}
+                            onClick={() => {
+                              if (judgeAccessBoxId == null) return;
+                              openSetJudgePasswordDialog(judgeAccessBoxId);
+                            }}
+                            disabled={!judgeAccessSelected}
                             type="button"
                           >
-                            Open judge view
+                            Set judge password
                           </button>
                           <button
                             className="modern-btn modern-btn-ghost"
@@ -3029,14 +3033,11 @@ const ControlPanel: FC = () => {
                           </button>
                           <button
                             className="modern-btn modern-btn-ghost"
-                            onClick={() => {
-                              if (judgeAccessBoxId == null) return;
-                              openSetJudgePasswordDialog(judgeAccessBoxId);
-                            }}
-                            disabled={!judgeAccessSelected}
+                            onClick={openJudgeViewFromAdmin}
+                            disabled={!judgeAccessSelected || !judgeAccessBox?.initiated}
                             type="button"
                           >
-                            Set judge password
+                            Open judge view
                           </button>
                           </div>
                         </div>
@@ -3076,21 +3077,40 @@ const ControlPanel: FC = () => {
                           </button>
                           <button
                             className="modern-btn modern-btn-ghost"
-                            onClick={() => {
-                              window.open(`${window.location.origin}/#/rankings`, '_blank');
-                            }}
-                            type="button"
-                          >
-                            Open public rankings
-                          </button>
-                          <button
-                            className="modern-btn modern-btn-ghost"
                             onClick={() => openRoutesetterDialog(setupBoxId)}
                             disabled={setupBoxId == null}
                             type="button"
                           >
                             Set competition officials
                           </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {adminActionsView === 'public' && (
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-[repeat(2,minmax(260px,1fr))] gap-3 overflow-x-auto">
+                        <div className={styles.adminCard}>
+                          <div className={styles.adminCardTitle}>Public View</div>
+                          <div className="flex flex-col gap-2 mt-3">
+                            <button
+                              className="modern-btn modern-btn-ghost"
+                              onClick={openPublicQrDialog}
+                              type="button"
+                            >
+                              Show public QR
+                            </button>
+                            <button
+                              className="modern-btn modern-btn-ghost"
+                              onClick={() => {
+                                window.open(`${window.location.origin}/#/rankings`, '_blank');
+                              }}
+                              type="button"
+                            >
+                              Open public rankings
+                            </button>
                           </div>
                         </div>
                       </div>

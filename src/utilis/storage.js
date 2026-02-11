@@ -23,7 +23,7 @@ const LRU_KEYS = [
 ];
 
 // Keys that should never be evicted
-const PROTECTED_KEYS = ['authToken', 'authRole', 'authBoxes'];
+const PROTECTED_KEYS = ['authToken', 'authRole', 'authBoxes', 'authActive'];
 
 /**
  * Safely set item in localStorage with quota handling
@@ -79,7 +79,9 @@ export const safeSetItem = (key, value) => {
             if (protectedKeys.has(k)) continue;
             try {
               localStorage.removeItem(k);
-            } catch {}
+            } catch {
+              // Best effort cleanup - ignore individual key removal failures.
+            }
           }
 
           localStorage.setItem(getKey(key), value);

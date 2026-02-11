@@ -18,6 +18,11 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
+    const holdsCountsNum = holdsCounts.map((h) => {
+      const parsed = typeof h === 'string' ? Number(h) : Number(h);
+      return Number.isInteger(parsed) ? parsed : NaN;
+    });
+
     // Basic client-side validation:
     // - file/category/routesCount must be present
     // - holdsCounts must contain a value for each route
@@ -26,7 +31,8 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
       !category ||
       !routesCount ||
       holdsCounts.length !== Number(routesCount) ||
-      holdsCounts.some((h) => !h)
+      holdsCounts.some((h) => !h) ||
+      holdsCountsNum.some((n) => !Number.isFinite(n) || n <= 0)
     ) {
       alert('Please fill in all fields.');
       return;
@@ -37,7 +43,7 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
       // Backend reads these as strings and parses `holdsCounts` as JSON.
       const formData = new FormData();
       formData.append('routesCount', routesCount);
-      formData.append('holdsCounts', JSON.stringify(holdsCounts));
+      formData.append('holdsCounts', JSON.stringify(holdsCountsNum));
       formData.append('category', category);
       formData.append('file', file);
       formData.append('include_clubs', 'true');
