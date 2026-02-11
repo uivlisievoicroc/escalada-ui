@@ -1422,6 +1422,56 @@ const ControlPanel: FC = () => {
 
     setLoadingBoxes((prev) => new Set(prev).add(boxIdx));
 
+    // If the timer is currently running, we must STOP it first so other tabs/devices (Judge/ContestPage)
+    // stop their local ticking before we reset the remaining time back to preset.
+    // Otherwise they can keep writing `timer-${boxIdx}` and immediately overwrite the reset value.
+    if (opts.resetTimer) {
+      try {
+        // Ensure session/version are fresh before issuing STOP_TIMER / RESET_PARTIAL.
+        const config = getApiConfig();
+        const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+          credentials: 'include',
+        });
+        if (res.status === 401 || res.status === 403) {
+          clearAuth();
+          setAdminRole(null);
+          setShowAdminLogin(true);
+          return;
+        }
+
+        let serverTimerState: TimerState | null = null;
+        if (res.ok) {
+          const st = await res.json();
+          if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+          if (typeof st?.boxVersion === 'number') safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+          if (typeof st?.timerState === 'string') serverTimerState = st.timerState as TimerState;
+        }
+
+        if (serverTimerState === 'running') {
+          const stopRes: any = await stopTimer(boxIdx);
+          if (stopRes?.status === 'ignored') {
+            debugWarn(`STOP_TIMER ignored before reset (box ${boxIdx}), resyncing...`);
+            try {
+              const res2 = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+                credentials: 'include',
+              });
+              if (res2.ok) {
+                const st2 = await res2.json();
+                if (st2?.sessionId) setSessionId(boxIdx, st2.sessionId);
+                if (typeof st2?.boxVersion === 'number')
+                  safeSetItem(`boxVersion-${boxIdx}`, String(st2.boxVersion));
+              }
+            } catch (err) {
+              debugError(`Failed to resync state after ignored STOP_TIMER (box ${boxIdx})`, err);
+            }
+            await stopTimer(boxIdx);
+          }
+        }
+      } catch (err) {
+        debugError(`Failed to STOP_TIMER before reset (box ${boxIdx})`, err);
+      }
+    }
+
     // Client-side only (tab management)
     if (opts.closeTab) {
       const tab = openTabs[boxIdx];
@@ -1438,17 +1488,69 @@ const ControlPanel: FC = () => {
       setListboxes((prev) =>
         prev.map((lb, i) => {
           if (i !== boxIdx) return lb;
-          return { ...lb, concurenti: lb.concurenti.map((c) => ({ ...c, marked: false })) };
+          const nextRouteIndex = 1;
+          const firstHolds = Array.isArray(lb.holdsCounts) ? Number(lb.holdsCounts[0] ?? lb.holdsCount) : lb.holdsCount;
+          // Restart the entire competition flow for this box (route 1, first competitor).
+          return {
+            ...lb,
+            routeIndex: nextRouteIndex,
+            holdsCount: Number.isFinite(firstHolds) ? firstHolds : lb.holdsCount,
+            initiated: false,
+            concurenti: lb.concurenti.map((c) => ({ ...c, marked: false })),
+          };
         }),
       );
+      setCurrentClimbers((prev) => {
+        // Pre-init state has no active climber until INIT_ROUTE is called again.
+        return { ...prev, [boxIdx]: '' };
+      });
     }
     if (opts.resetTimer) {
+      // If this box timer is currently running, the headless timer engine might write one more tick
+      // before React refs/effects observe the new `timerStates` value. Force-stop it immediately
+      // to prevent overwriting the reset value.
+      timerEngineEndAtMsRef.current[boxIdx] = null;
+      delete timerEngineLastRemainingRef.current[boxIdx];
+      delete timerEngineLastSentAtRef.current[boxIdx];
+      lastExternalTimerSyncAtRef.current[boxIdx] = Date.now();
+      timerStatesRef.current[boxIdx] = 'idle';
+
       setTimerStates((prev) => ({ ...prev, [boxIdx]: 'idle' }));
-      setTimerSecondsForBox(boxIdx, defaultTimerSec(boxIdx));
+      const presetSec = defaultTimerSec(boxIdx);
+      setTimerSecondsForBox(boxIdx, presetSec);
+      // Best-effort: broadcast the reset remaining time so Judge/Public update immediately.
+      void sendTimerSync(boxIdx, presetSec);
+      clearRegisteredTime(boxIdx);
     }
 
     try {
       if (opts.resetTimer || opts.clearProgress || opts.unmarkAll) {
+        // RESET_PARTIAL requires sessionId (and optionally boxVersion). Ensure we have them,
+        // because ControlPanel may run "headless" without having opened ContestPage for hydration.
+        if (!getSessionId(boxIdx) || getBoxVersion(boxIdx) == null) {
+          try {
+            const config = getApiConfig();
+            const res = await fetch(`${config.API_CP.replace('/cmd', '')}/state/${boxIdx}`, {
+              credentials: 'include',
+            });
+            if (res.status === 401 || res.status === 403) {
+              clearAuth();
+              setAdminRole(null);
+              setShowAdminLogin(true);
+              return;
+            }
+            if (res.ok) {
+              const st = await res.json();
+              if (st?.sessionId) setSessionId(boxIdx, st.sessionId);
+              if (typeof st?.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${boxIdx}`, String(st.boxVersion));
+              }
+            }
+          } catch (err) {
+            debugError(`Failed to prefetch state before RESET_PARTIAL (box ${boxIdx})`, err);
+          }
+        }
+
         const result: any = await resetBoxPartial(boxIdx, {
           resetTimer: opts.resetTimer,
           clearProgress: opts.clearProgress,
@@ -1485,6 +1587,18 @@ const ControlPanel: FC = () => {
           if (retry?.status === 'ignored') {
             debugWarn(`RESET_PARTIAL still ignored after resync (box ${boxIdx})`);
           }
+        }
+      }
+
+      // Local-only cleanup for "restart competition" so cached rankings from the previous run
+      // don't leak into the next initiation.
+      if (opts.unmarkAll) {
+        try {
+          safeRemoveItem(`ranking-${boxIdx}`);
+          safeRemoveItem(`rankingTimes-${boxIdx}`);
+          safeRemoveItem(`podium-${boxIdx}`);
+        } catch (err) {
+          debugError(`Failed to clear cached rankings/podium for box ${boxIdx}`, err);
         }
       }
       setShowResetDialog(false);
