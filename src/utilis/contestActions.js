@@ -582,6 +582,108 @@ export async function resetBoxPartial(boxId, opts = {}) {
   }
 }
 
+/**
+ * Persist manual time tiebreak decision for current eligible top-3 tie event.
+ * @param {number} boxId
+ * @param {'yes'|'no'} decision
+ * @param {string} fingerprint
+ * @throws {Error} If API request fails
+ */
+export async function setTimeTiebreakDecision(boxId, decision, fingerprint) {
+  try {
+    const normalizedDecision = String(decision || '').trim().toLowerCase();
+    const normalizedFingerprint = String(fingerprint || '').trim();
+    const response = await fetchWithRetry(
+      API,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          boxId,
+          type: 'SET_TIME_TIEBREAK_DECISION',
+          timeTiebreakDecision: normalizedDecision,
+          timeTiebreakFingerprint: normalizedFingerprint,
+          sessionId: getSessionId(boxId),
+          boxVersion: getBoxVersion(boxId),
+        }),
+      },
+      3,
+      5000,
+    );
+
+    await validateResponse(response, 'SET_TIME_TIEBREAK_DECISION');
+    return await response.json();
+  } catch (err) {
+    debugError('[setTimeTiebreakDecision] Error:', err);
+    throw err;
+  }
+}
+
+/**
+ * Persist manual previous-rounds tiebreak decision for current eligible top-3 tie event.
+ * @param {number} boxId
+ * @param {'yes'|'no'} decision
+ * @param {string} fingerprint
+ * @param {string[]} order
+ * @param {Record<string, number>} ranksByName
+ * @throws {Error} If API request fails
+ */
+export async function setPrevRoundsTiebreakDecision(
+  boxId,
+  decision,
+  fingerprint,
+  order = [],
+  ranksByName = {},
+) {
+  try {
+    const normalizedDecision = String(decision || '').trim().toLowerCase();
+    const normalizedFingerprint = String(fingerprint || '').trim();
+    const normalizedOrder = Array.isArray(order)
+      ? order
+          .map((item) => (typeof item === 'string' ? item.trim() : ''))
+          .filter((item, idx, arr) => item && arr.indexOf(item) === idx)
+      : [];
+    const normalizedRanksByName =
+      ranksByName && typeof ranksByName === 'object'
+        ? Object.entries(ranksByName).reduce((acc, [name, rank]) => {
+            const cleanName = typeof name === 'string' ? name.trim() : '';
+            if (!cleanName) return acc;
+            const value = Number(rank);
+            if (!Number.isFinite(value) || value <= 0) return acc;
+            acc[cleanName] = Math.trunc(value);
+            return acc;
+          }, {})
+        : {};
+    const response = await fetchWithRetry(
+      API,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          boxId,
+          type: 'SET_PREV_ROUNDS_TIEBREAK_DECISION',
+          prevRoundsTiebreakDecision: normalizedDecision,
+          prevRoundsTiebreakFingerprint: normalizedFingerprint,
+          prevRoundsTiebreakOrder: normalizedOrder,
+          prevRoundsTiebreakRanksByName: normalizedRanksByName,
+          sessionId: getSessionId(boxId),
+          boxVersion: getBoxVersion(boxId),
+        }),
+      },
+      3,
+      5000,
+    );
+
+    await validateResponse(response, 'SET_PREV_ROUNDS_TIEBREAK_DECISION');
+    return await response.json();
+  } catch (err) {
+    debugError('[setPrevRoundsTiebreakDecision] Error:', err);
+    throw err;
+  }
+}
+
 // ==================== EXPORTS ====================
 
 export { getSessionId, setSessionId, getBoxVersion };

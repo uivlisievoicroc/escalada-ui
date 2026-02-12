@@ -50,6 +50,29 @@ export type PublicBox = {
   timeCriterionEnabled?: boolean | null;
   scoresByName?: Record<string, Array<number | null | undefined>>;
   timesByName?: Record<string, Array<number | null | undefined>>;
+  timeTiebreakPreference?: 'yes' | 'no' | null;
+  timeTiebreakDecisions?: Record<string, 'yes' | 'no'>;
+  timeTiebreakResolvedFingerprint?: string | null;
+  timeTiebreakResolvedDecision?: 'yes' | 'no' | null;
+  prevRoundsTiebreakPreference?: 'yes' | 'no' | null;
+  prevRoundsTiebreakDecisions?: Record<string, 'yes' | 'no'>;
+  prevRoundsTiebreakOrders?: Record<string, string[]>;
+  prevRoundsTiebreakResolvedFingerprint?: string | null;
+  prevRoundsTiebreakResolvedDecision?: 'yes' | 'no' | null;
+  timeTiebreakCurrentFingerprint?: string | null;
+  timeTiebreakHasEligibleTie?: boolean;
+  timeTiebreakIsResolved?: boolean;
+  leadRankingRows?: Array<{
+    name: string;
+    rank: number;
+    score?: number | null;
+    total?: number | null;
+    time?: number | null;
+    tb_time?: boolean;
+    tb_prev?: boolean;
+    raw_scores?: Array<number | null | undefined>;
+    raw_times?: Array<number | null | undefined>;
+  }>;
 };
 
 /**
@@ -68,16 +91,8 @@ type RankingRow = {
   raw: Array<number | null | undefined>;
   rawTimes: Array<number | null | undefined>;
   total: number;
-};
-
-/**
- * RankInfo - Intermediate Per-Route Ranking
- *
- * Used internally by calcRankPointsPerRoute for sorting competitors by score.
- */
-type RankInfo = {
-  nume: string;
-  score: number;
+  tbTime: boolean;
+  tbPrev: boolean;
 };
 
 /**
@@ -138,6 +153,7 @@ export const normalizeBox = (box: PublicBox): PublicBox => ({
   timerState: box.timerState || 'idle',
   remaining: typeof box.remaining === 'number' ? box.remaining : null,
   timeCriterionEnabled: !!box.timeCriterionEnabled,
+  leadRankingRows: Array.isArray(box.leadRankingRows) ? box.leadRankingRows : [],
 });
 
 /**
@@ -161,102 +177,6 @@ const formatSeconds = (sec: number | null | undefined): string => {
   return `${m}:${s}`;
 };
 
-/**
- * calcRankPointsPerRoute - Calculate Per-Route Rankings with Tie Handling
- *
- * Purpose:
- * - Ranks competitors for each route individually
- * - Handles ties using average rank method (IFSC standard)
- * - Returns rank points for geometric mean calculation
- *
- * Tie Handling Example:
- * - Scores: [100, 90, 90, 80]
- * - Ranks: [1, 2.5, 2.5, 4] (two tied for 2nd → average of 2 and 3 = 2.5)
- *
- * Why Average Rank:
- * - Fair: Tied competitors get same advantage
- * - Standard: Used by IFSC (International Federation of Sport Climbing)
- * - Geometric mean compatible: Fractional ranks allowed
- */
-const calcRankPointsPerRoute = (
-  scoresByName: Record<string, Array<number | null | undefined>>,
-  nRoutes: number,
-): { rankPoints: Record<string, (number | undefined)[]>; nCompetitors: number } => {
-  const rankPoints: Record<string, (number | undefined)[]> = {};
-  let nCompetitors = 0;
-
-  // Process each route individually
-  for (let r = 0; r < nRoutes; r++) {
-    const list: RankInfo[] = [];
-    Object.entries(scoresByName).forEach(([nume, arr]) => {
-      const score = arr?.[r];
-      if (typeof score !== 'number' || !Number.isFinite(score)) return;
-      list.push({ nume, score });
-    });
-
-    // Sort by score descending (highest score = rank 1)
-    list.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
-    });
-
-    // Assign ranks with tie handling
-    let pos = 1;
-    for (let i = 0; i < list.length; ) {
-      const current = list[i];
-      let j = i;
-      // Find all competitors with same score (tie group)
-      while (j < list.length && list[j].score === current.score) {
-        j++;
-      }
-      const tieCount = j - i;
-      const first = pos;
-      const last = pos + tieCount - 1;
-      const avgRank = (first + last) / 2;  // Average rank for ties
-
-      // Assign average rank to all tied competitors
-      for (let k = i; k < j; k++) {
-        const x = list[k];
-        if (!rankPoints[x.nume]) rankPoints[x.nume] = Array(nRoutes).fill(undefined);
-        rankPoints[x.nume][r] = avgRank;
-      }
-      pos += tieCount;
-      i = j;
-    }
-    nCompetitors = Math.max(nCompetitors, list.length);
-  }
-
-  return { rankPoints, nCompetitors };
-};
-
-/**
- * geomMean - Calculate Geometric Mean of Per-Route Ranks
- *
- * Purpose:
- * - Aggregates per-route rankings into single total score
- * - Penalizes inconsistency (one bad route significantly impacts total)
- * - Standard IFSC ranking method
- *
- * Formula:
- * - Geometric Mean = (r1 * r2 * ... * rN)^(1/N)
- * - Example: Routes [2, 3, 4] → (2*3*4)^(1/3) = 2.884
- *
- * Missing Score Handling:
- * - undefined ranks replaced with (nCompetitors + 1)
- * - Severe penalty: Ensures missing routes rank below all present competitors
- *
- * Why Geometric Mean (vs Arithmetic):
- * - Rewards consistent performance, penalizes outliers
- * - Example: [1,1,10] geo=2.15 vs [2,3,4] geo=2.88 (consistent ranks better)
- */
-const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: number): number => {
-  const filled = arr.map((v) => v ?? nCompetitors + 1);
-  if (filled.length < nRoutes) {
-    while (filled.length < nRoutes) filled.push(nCompetitors + 1);
-  }
-  const prod = filled.reduce((p, x) => p * x, 1);
-  return Number(Math.pow(prod, 1 / nRoutes).toFixed(3));
-};
 
 /**
  * buildRankingRows - Build Complete Rankings Table
@@ -278,41 +198,24 @@ const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: nu
  * - Example: totals [1.5, 2.2, 2.2, 3.0] → ranks [1, 2, 2, 4]
  */
 const buildRankingRows = (box: PublicBox): RankingRow[] => {
-  const routesCount = Math.max(
-    1,
-    Number(box.routesCount || 0),
-    Number(box.routeIndex || 0),
-    Array.isArray(box.holdsCounts) ? box.holdsCounts.length : 0,
-  );
-  const scores = box.scoresByName || {};
-  const times = box.timesByName || {};
-  const { rankPoints, nCompetitors } = calcRankPointsPerRoute(scores, routesCount);
-  const baseRows = Object.keys(rankPoints).map((nume) => {
-    const rp = rankPoints[nume];
-    const raw = (scores[nume] || []).map((value) => (typeof value === 'number' ? value : undefined));
-    const rawTimes = (times[nume] || []).map((value) =>
-      typeof value === 'number' ? value : undefined,
-    );
-    const total = geomMean(rp, routesCount, nCompetitors);
-    return { nume, raw, rawTimes, total };
-  });
-
-  baseRows.sort((a, b) => {
-    if (a.total !== b.total) return a.total - b.total;
-    return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
-  });
-
-  const withRank: RankingRow[] = [];
-  let prevTotal: number | null = null;
-  let prevRank = 0;
-  baseRows.forEach((row, idx) => {
-    const rank = row.total === prevTotal ? prevRank : idx + 1;
-    withRank.push({ ...row, rank });
-    prevTotal = row.total;
-    prevRank = rank;
-  });
-
-  return withRank;
+  const rows = Array.isArray(box.leadRankingRows) ? box.leadRankingRows : [];
+  return rows
+    .map((row) => ({
+      rank: Math.max(1, Number(row.rank || 1)),
+      nume: typeof row.name === 'string' ? row.name : '',
+      raw: Array.isArray(row.raw_scores) ? row.raw_scores : [],
+      rawTimes: Array.isArray(row.raw_times) ? row.raw_times : [],
+      total:
+        typeof row.total === 'number'
+          ? row.total
+          : typeof row.score === 'number'
+          ? row.score
+          : 0,
+      tbTime: !!row.tb_time,
+      tbPrev: !!row.tb_prev,
+    }))
+    .filter((row) => !!row.nume)
+    .sort((a, b) => a.rank - b.rank || a.nume.localeCompare(b.nume));
 };
 
 /**
@@ -596,7 +499,7 @@ const RankingsBoard: FC<RankingsBoardProps> = ({ boxes, selectedBoxId, setSelect
                 ) : (
                   visibleRows.map((row, localIndex) => {
                     const globalIndex = pageStartIndex + localIndex;  // Global index for zebra striping
-                    const showTime = !!selectedBox.timeCriterionEnabled && globalIndex < 3;  // Show time for top 3
+                    const showTime = !!selectedBox.timeCriterionEnabled && row.rank <= 3;
                     const zebra = globalIndex % 2 === 0;  // Zebra striping (alternating colors)
 
                     return (
@@ -632,6 +535,16 @@ const RankingsBoard: FC<RankingsBoardProps> = ({ boxes, selectedBoxId, setSelect
                             <span className="font-medium text-slate-50">
                               {sanitizeCompetitorName(row.nume)}
                             </span>
+                            {row.tbTime && (
+                              <span className="inline-flex items-center rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-200">
+                                TB Time
+                              </span>
+                            )}
+                            {row.tbPrev && (
+                              <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                                TB Prev
+                              </span>
+                            )}
                           </div>
                         </div>
 

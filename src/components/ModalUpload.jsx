@@ -8,7 +8,7 @@ import styles from './ControlPanel.module.css';
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
 const API_BASE = `${API_PROTOCOL}://${window.location.hostname}:8000/api/admin`;
 
-const ModalUpload = ({ isOpen, onClose, onUpload }) => {
+const ModalUpload = ({ isOpen, onClose, onUpload, embedded = false }) => {
   // Form state: category label, Excel file, number of routes and per-route holds count.
   const [category, setCategory] = useState('');
   const [file, setFile] = useState(null);
@@ -92,8 +92,112 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
     }
   };
 
-  // Unmount the modal when closed.
+  // Unmount when closed.
   if (!isOpen) return null;
+
+  const formContent = (
+    <form onSubmit={handleSubmit} className={styles.modalContent}>
+      {/* Category label is used throughout the UI (dropdowns, headers, exports). */}
+      <div className={styles.modalField}>
+        <label className={styles.modalLabel}>Category</label>
+        <input
+          type="text"
+          id="upload-category"
+          name="category"
+          placeholder="Category (e.g. U16-Boys)"
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          className={styles.modalInput}
+          required
+        />
+      </div>
+      {/* Number of routes */}
+      <div className={styles.modalField}>
+        <label className={styles.modalLabel}>Number of routes</label>
+        <input
+          type="number"
+          min="1"
+          id="upload-routes-count"
+          name="routesCount"
+          placeholder="Number of routes"
+          value={routesCount}
+          onChange={(e) => {
+            const val = e.target.value;
+            // Keep holdsCounts aligned with routesCount so we render one input per route.
+            setRoutesCount(val);
+            setHoldsCounts(Array(Number(val)).fill(''));
+          }}
+          className={styles.modalInput}
+          required
+        />
+      </div>
+      {/* Holds per route */}
+      {routesCount &&
+        Array.from({ length: Number(routesCount) }).map((_, i) => (
+          <div key={i} className={styles.modalField}>
+            <label className={styles.modalLabel}>Route {i + 1} holds</label>
+            <input
+              type="number"
+              min="1"
+              id={`upload-holds-${i + 1}`}
+              name={`holdsRoute${i + 1}`}
+              placeholder={`Number of holds, Route ${i + 1}`}
+              value={holdsCounts[i] || ''}
+              onChange={(e) => {
+                // Copy-on-write to keep React state updates predictable.
+                const newCounts = [...holdsCounts];
+                newCounts[i] = e.target.value;
+                setHoldsCounts(newCounts);
+              }}
+              className={styles.modalInput}
+              required
+            />
+          </div>
+        ))}
+      {/* Excel file containing competitors (Name, Club). */}
+      <div className={styles.modalField}>
+        <label className={styles.modalLabel}>Excel file</label>
+        <input
+          type="file"
+          accept=".xlsx"
+          onChange={(e) => setFile(e.target.files[0])}
+          className={styles.modalInput}
+          style={{ padding: '8px 12px' }}
+          required
+        />
+      </div>
+      {/* Actions: Cancel keeps data local; Upload sends to API and returns a listbox object. */}
+      <div className={styles.modalActions}>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="modern-btn modern-btn-ghost"
+          >
+            Cancel
+          </button>
+        )}
+        <button
+          type="submit"
+          className="modern-btn modern-btn-primary"
+        >
+          Upload
+        </button>
+      </div>
+    </form>
+  );
+
+  if (embedded) {
+    return (
+      <div className={styles.adminCard}>
+        <div className={styles.adminCardTitle}>Upload Listbox Category</div>
+        <div className={styles.modalSubtitle} style={{ marginBottom: '14px' }}>
+          Upload an Excel file with competitor data
+        </div>
+        {formContent}
+      </div>
+    );
+  }
 
   return (
     <div className={styles.modalOverlay}>
@@ -106,93 +210,7 @@ const ModalUpload = ({ isOpen, onClose, onUpload }) => {
             </div>
           </div>
         </div>
-        <form onSubmit={handleSubmit} className={styles.modalContent}>
-          {/* Category label is used throughout the UI (dropdowns, headers, exports). */}
-          <div className={styles.modalField}>
-            <label className={styles.modalLabel}>Category</label>
-            <input
-              type="text"
-              id="upload-category"
-              name="category"
-              placeholder="Category (e.g. U16-Boys)"
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              className={styles.modalInput}
-              required
-            />
-          </div>
-          {/* Number of routes */}
-          <div className={styles.modalField}>
-            <label className={styles.modalLabel}>Number of routes</label>
-            <input
-              type="number"
-              min="1"
-              id="upload-routes-count"
-              name="routesCount"
-              placeholder="Number of routes"
-              value={routesCount}
-              onChange={(e) => {
-                const val = e.target.value;
-                // Keep holdsCounts aligned with routesCount so we render one input per route.
-                setRoutesCount(val);
-                setHoldsCounts(Array(Number(val)).fill(''));
-              }}
-              className={styles.modalInput}
-              required
-            />
-          </div>
-          {/* Holds per route */}
-          {routesCount &&
-            Array.from({ length: Number(routesCount) }).map((_, i) => (
-              <div key={i} className={styles.modalField}>
-                <label className={styles.modalLabel}>Route {i + 1} holds</label>
-                <input
-                  type="number"
-                  min="1"
-                  id={`upload-holds-${i + 1}`}
-                  name={`holdsRoute${i + 1}`}
-                  placeholder={`Number of holds, Route ${i + 1}`}
-                  value={holdsCounts[i] || ''}
-                  onChange={(e) => {
-                    // Copy-on-write to keep React state updates predictable.
-                    const newCounts = [...holdsCounts];
-                    newCounts[i] = e.target.value;
-                    setHoldsCounts(newCounts);
-                  }}
-                  className={styles.modalInput}
-                  required
-                />
-              </div>
-            ))}
-          {/* Excel file containing competitors (Name, Club). */}
-          <div className={styles.modalField}>
-            <label className={styles.modalLabel}>Excel file</label>
-            <input
-              type="file"
-              accept=".xlsx"
-              onChange={(e) => setFile(e.target.files[0])}
-              className={styles.modalInput}
-              style={{ padding: '8px 12px' }}
-              required
-            />
-          </div>
-          {/* Actions: Cancel keeps data local; Upload sends to API and returns a listbox object. */}
-          <div className={styles.modalActions}>
-            <button
-              type="button"
-              onClick={onClose}
-              className="modern-btn modern-btn-ghost"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="modern-btn modern-btn-primary"
-            >
-              Upload
-            </button>
-          </div>
-        </form>
+        {formContent}
       </div>
     </div>
   );

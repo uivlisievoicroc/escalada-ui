@@ -75,6 +75,8 @@ export type CommandType =
   | 'REQUEST_ACTIVE_COMPETITOR'
   | 'ACTIVE_CLIMBER'
   | 'SET_TIME_CRITERION'
+  | 'SET_TIME_TIEBREAK_DECISION'
+  | 'SET_PREV_ROUNDS_TIEBREAK_DECISION'
   | 'TIMER_SYNC';
 
 /**
@@ -99,6 +101,36 @@ export interface StateSnapshot {
   registeredTime?: number | null;
   remaining?: number | null;
   timeCriterionEnabled?: boolean;
+  timeTiebreakPreference?: 'yes' | 'no' | null;
+  timeTiebreakDecisions?: Record<string, 'yes' | 'no'>;
+  timeTiebreakResolvedFingerprint?: string | null;
+  timeTiebreakResolvedDecision?: 'yes' | 'no' | null;
+  prevRoundsTiebreakPreference?: 'yes' | 'no' | null;
+  prevRoundsTiebreakDecisions?: Record<string, 'yes' | 'no'>;
+  prevRoundsTiebreakOrders?: Record<string, string[]>;
+  prevRoundsTiebreakRanks?: Record<string, Record<string, number>>;
+  prevRoundsTiebreakResolvedFingerprint?: string | null;
+  prevRoundsTiebreakResolvedDecision?: 'yes' | 'no' | null;
+  timeTiebreakCurrentFingerprint?: string | null;
+  timeTiebreakHasEligibleTie?: boolean;
+  timeTiebreakIsResolved?: boolean;
+  leadRankingRows?: Array<{
+    name: string;
+    rank: number;
+    score?: number;
+    total?: number;
+    time?: number | null;
+    tb_time?: boolean;
+    tb_prev?: boolean;
+    raw_scores?: Array<number | null | undefined>;
+    raw_times?: Array<number | null | undefined>;
+  }>;
+  leadTieEvents?: Array<Record<string, any>>;
+  leadRankingResolved?: boolean;
+  leadRankingErrors?: string[];
+  timeTiebreakEligibleGroups?: TimeTiebreakEligibleGroup[];
+  scoresByName?: Record<string, Array<number | null | undefined>>;
+  timesByName?: Record<string, Array<number | null | undefined>>;
   timerPreset?: string | null;
   timerPresetSec?: number | null;
   judgeChief?: string;
@@ -157,6 +189,14 @@ export interface ApiCommand {
   remaining?: number;
   // SET_TIME_CRITERION fields
   timeCriterionEnabled?: boolean;
+  // SET_TIME_TIEBREAK_DECISION fields
+  timeTiebreakDecision?: 'yes' | 'no';
+  timeTiebreakFingerprint?: string;
+  // SET_PREV_ROUNDS_TIEBREAK_DECISION fields
+  prevRoundsTiebreakDecision?: 'yes' | 'no';
+  prevRoundsTiebreakFingerprint?: string;
+  prevRoundsTiebreakOrder?: string[];
+  prevRoundsTiebreakRanksByName?: Record<string, number>;
 }
 
 /**
@@ -166,6 +206,31 @@ export interface ApiResponse {
   status: 'ok' | 'error' | 'ignored';
   reason?: string;
   detail?: string;
+}
+
+export interface TimeTiebreakEligibleGroupMember {
+  name: string;
+  value: number | null;
+  time: number | null;
+}
+
+export interface TimeTiebreakEligibleGroup {
+  context: 'overall' | 'route';
+  rank: number;
+  value: number | null;
+  members: TimeTiebreakEligibleGroupMember[];
+  fingerprint: string;
+  stage?: 'previous_rounds' | 'time';
+  affectsPodium?: boolean;
+  status?: 'pending' | 'resolved' | 'error';
+  detail?: string | null;
+  prevRoundsDecision?: 'yes' | 'no' | null;
+  prevRoundsOrder?: string[] | null;
+  prevRoundsRanksByName?: Record<string, number> | null;
+  timeDecision?: 'yes' | 'no' | null;
+  resolvedDecision?: 'yes' | 'no' | null;
+  resolutionKind?: 'previous_rounds' | 'time' | null;
+  isResolved?: boolean;
 }
 
 /**

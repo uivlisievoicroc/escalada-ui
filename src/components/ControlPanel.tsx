@@ -11,7 +11,14 @@ import { debugLog, debugWarn, debugError } from '../utilis/debug';
 import styles from './ControlPanel.module.css';
 import { safeSetItem, safeGetItem, safeRemoveItem, safeGetJSON, safeSetJSON, storageKey } from '../utilis/storage';
 import { normalizeCompetitorKey, sanitizeBoxName, sanitizeCompetitorName } from '../utilis/sanitize';
-import type { Box, Competitor, WebSocketMessage, TimerState, LoadingBoxes } from '../types';
+import type {
+  Box,
+  Competitor,
+  WebSocketMessage,
+  TimerState,
+  LoadingBoxes,
+  TimeTiebreakEligibleGroup,
+} from '../types';
 import ModalUpload from './ModalUpload';
 import AdminExportOfficialView from './AdminExportOfficialView';
 import AdminAuditView from './AdminAuditView';
@@ -31,6 +38,8 @@ import {
   resetBoxPartial,
   getCompetitionOfficials,
   setCompetitionOfficials,
+  setTimeTiebreakDecision as setTimeTiebreakDecisionApi,
+  setPrevRoundsTiebreakDecision as setPrevRoundsTiebreakDecisionApi,
 } from '../utilis/contestActions';
 import ModalModifyScore from './ModalModifyScore';
 import useWebSocketWithHeartbeat from '../utilis/useWebSocketWithHeartbeat';
@@ -74,6 +83,46 @@ const ADMIN_VIEW_LABELS: Record<AdminActionsView, string> = {
 };
 
 type IconProps = React.SVGProps<SVGSVGElement>;
+type TimeTiebreakDecision = 'yes' | 'no';
+
+type LeadRankingRowSnapshot = {
+  name: string;
+  rank: number;
+  score?: number;
+  total?: number;
+  time?: number | null;
+  tb_time?: boolean;
+  tb_prev?: boolean;
+  raw_scores?: Array<number | null | undefined>;
+  raw_times?: Array<number | null | undefined>;
+};
+
+type TimeTiebreakSnapshot = {
+  preference: TimeTiebreakDecision | null;
+  decisions: Record<string, TimeTiebreakDecision>;
+  prevPreference: TimeTiebreakDecision | null;
+  prevDecisions: Record<string, TimeTiebreakDecision>;
+  prevOrders: Record<string, string[]>;
+  prevRanks: Record<string, Record<string, number>>;
+  resolvedFingerprint: string | null;
+  resolvedDecision: TimeTiebreakDecision | null;
+  prevResolvedFingerprint: string | null;
+  prevResolvedDecision: TimeTiebreakDecision | null;
+  currentFingerprint: string | null;
+  hasEligibleTie: boolean;
+  isResolved: boolean;
+  eligibleGroups: TimeTiebreakEligibleGroup[];
+  rankingRows: LeadRankingRowSnapshot[];
+};
+
+type TimeTiebreakPromptStage = 'previous-rounds' | 'time';
+
+type TimeTiebreakPrompt = {
+  boxId: number;
+  fingerprint: string;
+  stage: TimeTiebreakPromptStage;
+  group: TimeTiebreakEligibleGroup;
+};
 
 const IconBase: React.FC<IconProps> = ({ className, children, ...props }) => (
   <svg
@@ -176,6 +225,16 @@ const readTimeCriterionEnabled = (boxId: number): boolean => {
   if (perBox !== null) return perBox;
   const legacy = parseTimeCriterionValue(safeGetItem('timeCriterionEnabled'));
   return legacy ?? false;
+};
+
+const formatRegisteredSeconds = (seconds: number | null): string => {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return '—';
+  const total = Math.trunc(seconds);
+  const mins = Math.floor(total / 60)
+    .toString()
+    .padStart(2, '0');
+  const secs = (total % 60).toString().padStart(2, '0');
+  return `${mins}:${secs}`;
 };
 
 // Helpers for managing external tabs/windows and building QR URLs.
@@ -313,6 +372,17 @@ const ControlPanel: FC = () => {
   const [rankingStatus, setRankingStatus] = useState<
     Record<number, { message: string; type: 'info' | 'error' }>
   >({});
+  const [timeTiebreakByBox, setTimeTiebreakByBox] = useState<Record<number, TimeTiebreakSnapshot>>({});
+  const [timeTiebreakPromptQueue, setTimeTiebreakPromptQueue] = useState<TimeTiebreakPrompt[]>([]);
+  const [timeTiebreakDecisionBusy, setTimeTiebreakDecisionBusy] = useState<boolean>(false);
+  const [timeTiebreakDecisionError, setTimeTiebreakDecisionError] = useState<string | null>(null);
+  const promptedTimeTiebreakFingerprintsRef = useRef<Record<string, boolean>>({});
+  const autoTimeTiebreakInFlightRef = useRef<Record<string, boolean>>({});
+  const autoTimeTiebreakNextAttemptAtRef = useRef<Record<string, number>>({});
+  const prevRoundsRankDraftsRef = useRef<Record<string, Record<string, string>>>({});
+  const activeTimeTiebreakPrompt = timeTiebreakPromptQueue[0] ?? null;
+  const activeTimeTiebreakGroup = activeTimeTiebreakPrompt?.group ?? null;
+  const [prevRoundsRankInputs, setPrevRoundsRankInputs] = useState<Record<string, string>>({});
   const [loadingBoxes, setLoadingBoxes] = useState<LoadingBoxes>(new Set()); // TASK 3.1: Track loading operations
 
   // -------------------- Admin auth + export selection --------------------
@@ -401,6 +471,15 @@ const ControlPanel: FC = () => {
     }
     if (!enabled) {
       clearRegisteredTime(boxId);
+      clearPrevRoundsDraftsForBox(boxId);
+      setTimeTiebreakPromptQueue((prev) => {
+        const removed = prev.filter((prompt) => prompt.boxId === boxId);
+        removed.forEach((prompt) => {
+          const key = promptFingerprintKey(prompt.stage, prompt.fingerprint, boxId);
+          delete promptedTimeTiebreakFingerprintsRef.current[key];
+        });
+        return prev.filter((prompt) => prompt.boxId !== boxId);
+      });
     }
   };
 
@@ -446,6 +525,547 @@ const ControlPanel: FC = () => {
     }
   };
 
+  const parseTimeTiebreakDecision = (value: unknown): TimeTiebreakDecision | null => {
+    if (value === 'yes' || value === 'no') return value;
+    return null;
+  };
+
+  const promptFingerprintKey = (
+    stage: TimeTiebreakPromptStage,
+    fingerprint: string,
+    boxId: number,
+  ): string => `${boxId}:${stage}:${fingerprint}`;
+
+  const clearPrevRoundsDraftsForBox = (boxId: number): void => {
+    Object.keys(prevRoundsRankDraftsRef.current).forEach((key) => {
+      if (key.startsWith(`${boxId}:`)) {
+        delete prevRoundsRankDraftsRef.current[key];
+      }
+    });
+  };
+
+  const enqueueTimeTiebreakPrompt = (prompt: TimeTiebreakPrompt): void => {
+    setTimeTiebreakPromptQueue((prev) => {
+      const exists = prev.find(
+        (item) =>
+          item.boxId === prompt.boxId &&
+          item.fingerprint === prompt.fingerprint,
+      );
+      if (exists) {
+        return prev.map((item) =>
+          item.boxId === prompt.boxId &&
+          item.fingerprint === prompt.fingerprint
+            ? { ...item, stage: prompt.stage, group: prompt.group }
+            : item,
+        );
+      }
+      return [...prev, prompt];
+    });
+  };
+
+  const applyTimeTiebreakSnapshot = (boxId: number, msg: Record<string, unknown>): void => {
+    const existingSnapshot = timeTiebreakByBox[boxId];
+    const preference = parseTimeTiebreakDecision(msg.timeTiebreakPreference);
+    const resolvedDecision = parseTimeTiebreakDecision(msg.timeTiebreakResolvedDecision);
+    const resolvedFingerprint =
+      typeof msg.timeTiebreakResolvedFingerprint === 'string'
+        ? msg.timeTiebreakResolvedFingerprint
+        : null;
+    const resolvedDecisionsFromSnapshot: Record<string, TimeTiebreakDecision> = {};
+    if (msg.timeTiebreakDecisions && typeof msg.timeTiebreakDecisions === 'object') {
+      Object.entries(msg.timeTiebreakDecisions as Record<string, unknown>).forEach(
+        ([fingerprint, decision]) => {
+          const parsed = parseTimeTiebreakDecision(decision);
+          if (!fingerprint || !parsed) return;
+          resolvedDecisionsFromSnapshot[fingerprint] = parsed;
+        },
+      );
+    }
+    const mergedDecisions: Record<string, TimeTiebreakDecision> = {
+      ...(existingSnapshot?.decisions ?? {}),
+      ...resolvedDecisionsFromSnapshot,
+    };
+    if (resolvedFingerprint && resolvedDecision) {
+      mergedDecisions[resolvedFingerprint] = resolvedDecision;
+    }
+    const prevPreference = parseTimeTiebreakDecision(msg.prevRoundsTiebreakPreference);
+    const prevResolvedDecision = parseTimeTiebreakDecision(msg.prevRoundsTiebreakResolvedDecision);
+    const prevResolvedFingerprint =
+      typeof msg.prevRoundsTiebreakResolvedFingerprint === 'string'
+        ? msg.prevRoundsTiebreakResolvedFingerprint
+        : null;
+    const prevDecisionsFromSnapshot: Record<string, TimeTiebreakDecision> = {};
+    if (msg.prevRoundsTiebreakDecisions && typeof msg.prevRoundsTiebreakDecisions === 'object') {
+      Object.entries(msg.prevRoundsTiebreakDecisions as Record<string, unknown>).forEach(
+        ([fingerprint, decision]) => {
+          const parsed = parseTimeTiebreakDecision(decision);
+          if (!fingerprint || !parsed) return;
+          prevDecisionsFromSnapshot[fingerprint] = parsed;
+        },
+      );
+    }
+    const mergedPrevDecisions: Record<string, TimeTiebreakDecision> = {
+      ...(existingSnapshot?.prevDecisions ?? {}),
+      ...prevDecisionsFromSnapshot,
+    };
+    if (prevResolvedFingerprint && prevResolvedDecision) {
+      mergedPrevDecisions[prevResolvedFingerprint] = prevResolvedDecision;
+    }
+    const prevOrdersFromSnapshot: Record<string, string[]> = {};
+    if (msg.prevRoundsTiebreakOrders && typeof msg.prevRoundsTiebreakOrders === 'object') {
+      Object.entries(msg.prevRoundsTiebreakOrders as Record<string, unknown>).forEach(
+        ([fingerprint, order]) => {
+          if (!fingerprint || !Array.isArray(order)) return;
+          const normalized = order
+            .map((item) => (typeof item === 'string' ? item.trim() : ''))
+            .filter((item, idx, arr) => item && arr.indexOf(item) === idx);
+          if (normalized.length > 0) {
+            prevOrdersFromSnapshot[fingerprint] = normalized;
+          }
+        },
+      );
+    }
+    const mergedPrevOrders: Record<string, string[]> = {
+      ...(existingSnapshot?.prevOrders ?? {}),
+      ...prevOrdersFromSnapshot,
+    };
+    if (prevResolvedFingerprint && prevResolvedDecision === 'no') {
+      delete mergedPrevOrders[prevResolvedFingerprint];
+    }
+    const prevRanksFromSnapshot: Record<string, Record<string, number>> = {};
+    if (msg.prevRoundsTiebreakRanks && typeof msg.prevRoundsTiebreakRanks === 'object') {
+      Object.entries(msg.prevRoundsTiebreakRanks as Record<string, unknown>).forEach(
+        ([fingerprint, ranks]) => {
+          if (!fingerprint || !ranks || typeof ranks !== 'object') return;
+          const normalized = Object.entries(ranks as Record<string, unknown>).reduce(
+            (acc, [name, rank]) => {
+              if (typeof name !== 'string' || !name.trim()) return acc;
+              const num = Number(rank);
+              if (!Number.isFinite(num) || num <= 0) return acc;
+              acc[name.trim()] = Math.trunc(num);
+              return acc;
+            },
+            {} as Record<string, number>,
+          );
+          if (Object.keys(normalized).length > 0) {
+            prevRanksFromSnapshot[fingerprint] = normalized;
+          }
+        },
+      );
+    }
+    const mergedPrevRanks: Record<string, Record<string, number>> = {
+      ...(existingSnapshot?.prevRanks ?? {}),
+      ...prevRanksFromSnapshot,
+    };
+    const hasTieSnapshotPayload =
+      Array.isArray(msg.leadTieEvents) ||
+      Array.isArray(msg.timeTiebreakEligibleGroups) ||
+      Array.isArray(msg.leadRankingRows) ||
+      typeof msg.timeTiebreakHasEligibleTie === 'boolean' ||
+      typeof msg.timeTiebreakIsResolved === 'boolean' ||
+      typeof msg.leadRankingResolved === 'boolean';
+    const rawGroups = Array.isArray(msg.leadTieEvents)
+      ? (msg.leadTieEvents as unknown[])
+      : Array.isArray(msg.timeTiebreakEligibleGroups)
+      ? (msg.timeTiebreakEligibleGroups as unknown[])
+      : [];
+    const parsedGroups: TimeTiebreakEligibleGroup[] = rawGroups
+      .map((raw) => (raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null))
+      .filter((raw): raw is Record<string, unknown> => !!raw)
+      .map((raw) => {
+        const members = Array.isArray(raw.members)
+          ? raw.members
+              .map((memberRaw) =>
+                memberRaw && typeof memberRaw === 'object'
+                  ? (memberRaw as Record<string, unknown>)
+                  : null,
+              )
+              .filter((member): member is Record<string, unknown> => !!member)
+              .map((member) => ({
+                name: typeof member.name === 'string' ? member.name : '',
+                time: typeof member.time === 'number' ? member.time : null,
+                value: typeof member.value === 'number' ? member.value : null,
+              }))
+              .filter((member) => !!member.name)
+          : [];
+        const stageRaw =
+          raw.stage === 'time' || raw.stage === 'previous_rounds'
+            ? (raw.stage as 'time' | 'previous_rounds')
+            : null;
+        const prevDecisionRaw = parseTimeTiebreakDecision(
+          raw.prev_rounds_decision ?? raw.prevRoundsDecision,
+        );
+        const timeDecisionRaw = parseTimeTiebreakDecision(raw.time_decision ?? raw.timeDecision);
+        const affectsPodium =
+          typeof raw.affects_podium === 'boolean'
+            ? raw.affects_podium
+            : typeof raw.affectsPodium === 'boolean'
+            ? raw.affectsPodium
+            : Number(raw.rank || 0) <= 3;
+        const prevOrderRaw = Array.isArray(raw.prev_rounds_order ?? raw.prevRoundsOrder)
+          ? ((raw.prev_rounds_order ?? raw.prevRoundsOrder) as unknown[])
+              .map((item) => (typeof item === 'string' ? item.trim() : ''))
+              .filter((item, idx, arr) => !!item && arr.indexOf(item) === idx)
+          : null;
+        const prevRanksRaw = (raw.prev_rounds_ranks_by_name ??
+          raw.prevRoundsRanksByName) as Record<string, unknown> | undefined;
+        const prevRanksNormalized =
+          prevRanksRaw && typeof prevRanksRaw === 'object'
+            ? Object.entries(prevRanksRaw).reduce((acc, [name, rank]) => {
+                if (typeof name !== 'string' || !name.trim()) return acc;
+                const num = Number(rank);
+                if (!Number.isFinite(num) || num <= 0) return acc;
+                acc[name.trim()] = Math.trunc(num);
+                return acc;
+              }, {} as Record<string, number>)
+            : null;
+        return {
+          context:
+            raw.context === 'route' || raw.context === 'overall'
+              ? (raw.context as 'route' | 'overall')
+              : 'overall',
+          rank: Math.max(1, Number(raw.rank || 1)),
+          value: typeof raw.value === 'number' ? raw.value : null,
+          members,
+          fingerprint: typeof raw.fingerprint === 'string' ? raw.fingerprint : '',
+          stage: stageRaw || (prevDecisionRaw == null || prevDecisionRaw === 'yes' ? 'previous_rounds' : 'time'),
+          affectsPodium,
+          status:
+            raw.status === 'pending' || raw.status === 'resolved' || raw.status === 'error'
+              ? (raw.status as 'pending' | 'resolved' | 'error')
+              : undefined,
+          detail: typeof raw.detail === 'string' ? raw.detail : null,
+          prevRoundsDecision: prevDecisionRaw,
+          prevRoundsOrder: prevOrderRaw,
+          prevRoundsRanksByName:
+            prevRanksNormalized && Object.keys(prevRanksNormalized).length > 0
+              ? prevRanksNormalized
+              : null,
+          timeDecision: timeDecisionRaw,
+          resolvedDecision: timeDecisionRaw,
+          resolutionKind:
+            raw.resolution_kind === 'time' || raw.resolution_kind === 'previous_rounds'
+              ? (raw.resolution_kind as 'time' | 'previous_rounds')
+              : null,
+          isResolved:
+            typeof raw.is_resolved === 'boolean'
+              ? raw.is_resolved
+              : typeof raw.isResolved === 'boolean'
+              ? raw.isResolved
+              : raw.status === 'resolved',
+        } as TimeTiebreakEligibleGroup;
+      })
+      .filter((group) => group.fingerprint && group.members.length > 1);
+    const eligibleGroups = hasTieSnapshotPayload
+      ? parsedGroups
+      : existingSnapshot?.eligibleGroups ?? [];
+    const rankingRows = Array.isArray(msg.leadRankingRows)
+      ? (msg.leadRankingRows as LeadRankingRowSnapshot[])
+      : existingSnapshot?.rankingRows ?? [];
+    const currentFingerprint =
+      (typeof msg.timeTiebreakCurrentFingerprint === 'string'
+        ? msg.timeTiebreakCurrentFingerprint
+        : null) ||
+      (typeof msg.fingerprint === 'string' ? msg.fingerprint : null) ||
+      (hasTieSnapshotPayload ? null : existingSnapshot?.currentFingerprint ?? null);
+    const hasEligibleTie =
+      typeof msg.timeTiebreakHasEligibleTie === 'boolean'
+        ? msg.timeTiebreakHasEligibleTie
+        : hasTieSnapshotPayload
+        ? eligibleGroups.length > 0
+        : existingSnapshot?.hasEligibleTie ?? false;
+    const isResolved =
+      typeof msg.leadRankingResolved === 'boolean'
+        ? msg.leadRankingResolved
+        : typeof msg.timeTiebreakIsResolved === 'boolean'
+        ? msg.timeTiebreakIsResolved
+        : hasTieSnapshotPayload
+        ? eligibleGroups.filter((g) => !!g.affectsPodium).every((g) => g.isResolved)
+        : existingSnapshot?.isResolved ?? true;
+
+    setTimeTiebreakByBox((prev) => ({
+      ...prev,
+      [boxId]: {
+        preference: preference ?? prev[boxId]?.preference ?? null,
+        decisions: mergedDecisions,
+        prevPreference: prevPreference ?? prev[boxId]?.prevPreference ?? null,
+        prevDecisions: mergedPrevDecisions,
+        prevOrders: mergedPrevOrders,
+        prevRanks: mergedPrevRanks,
+        resolvedFingerprint: resolvedFingerprint ?? prev[boxId]?.resolvedFingerprint ?? null,
+        resolvedDecision: resolvedDecision ?? prev[boxId]?.resolvedDecision ?? null,
+        prevResolvedFingerprint:
+          prevResolvedFingerprint ?? prev[boxId]?.prevResolvedFingerprint ?? null,
+        prevResolvedDecision: prevResolvedDecision ?? prev[boxId]?.prevResolvedDecision ?? null,
+        currentFingerprint,
+        hasEligibleTie,
+        isResolved,
+        eligibleGroups,
+        rankingRows,
+      },
+    }));
+
+    const criterionEnabled =
+      typeof msg.timeCriterionEnabled === 'boolean'
+        ? msg.timeCriterionEnabled
+        : getTimeCriterionEnabled(boxId);
+    const shouldPrompt =
+      criterionEnabled &&
+      hasEligibleTie &&
+      adminRole === 'admin' &&
+      isAuthenticated();
+    if (!shouldPrompt) {
+      setTimeTiebreakPromptQueue((prev) => {
+        const removed = prev.filter((prompt) => prompt.boxId === boxId);
+        removed.forEach((prompt) => {
+          const key = promptFingerprintKey(prompt.stage, prompt.fingerprint, boxId);
+          delete promptedTimeTiebreakFingerprintsRef.current[key];
+        });
+        return prev.filter((prompt) => prompt.boxId !== boxId);
+      });
+      return;
+    }
+
+    const unresolvedGroups = eligibleGroups.filter((group) => !group.isResolved);
+    const unresolvedPodiumGroups = unresolvedGroups.filter((group) => !!group.affectsPodium);
+    const unresolvedTimeGroups = unresolvedGroups.filter(
+      (group) => group.stage === 'time' && !!group.affectsPodium,
+    );
+    const unresolvedTimeKeys = new Set(unresolvedTimeGroups.map((group) => `${boxId}:${group.fingerprint}`));
+    Object.keys(autoTimeTiebreakNextAttemptAtRef.current).forEach((key) => {
+      if (key.startsWith(`${boxId}:`) && !unresolvedTimeKeys.has(key)) {
+        delete autoTimeTiebreakNextAttemptAtRef.current[key];
+      }
+    });
+    unresolvedTimeGroups.forEach((group) => {
+      const key = `${boxId}:${group.fingerprint}`;
+      const now = Date.now();
+      const nextAttemptAt = autoTimeTiebreakNextAttemptAtRef.current[key] ?? 0;
+      if (now < nextAttemptAt) return;
+      if (autoTimeTiebreakInFlightRef.current[key]) return;
+      // Throttle background retries so live snapshots don't spam rate-limited commands.
+      autoTimeTiebreakNextAttemptAtRef.current[key] = now + 2000;
+      autoTimeTiebreakInFlightRef.current[key] = true;
+      void (async () => {
+        try {
+          await setTimeTiebreakDecisionApi(boxId, 'yes', group.fingerprint);
+        } catch (err) {
+          const message = String((err as any)?.message || err || '').toLowerCase();
+          if (message.includes('rate limit')) {
+            autoTimeTiebreakNextAttemptAtRef.current[key] = Date.now() + 6000;
+          }
+          debugError('Failed to auto-apply time tiebreak YES', err);
+        } finally {
+          delete autoTimeTiebreakInFlightRef.current[key];
+        }
+      })();
+    });
+
+    const unresolvedPromptGroups = unresolvedPodiumGroups.filter(
+      (group) => group.stage !== 'time',
+    );
+    setTimeTiebreakPromptQueue((prev) =>
+      prev.filter((prompt) =>
+        prompt.boxId !== boxId ||
+        unresolvedGroups.some((group) => group.fingerprint === prompt.fingerprint),
+      ),
+    );
+    unresolvedPromptGroups.forEach((group) => {
+      const stage: TimeTiebreakPromptStage = group.stage === 'time' ? 'time' : 'previous-rounds';
+      const promptKey = promptFingerprintKey(stage, group.fingerprint, boxId);
+      if (!promptedTimeTiebreakFingerprintsRef.current[promptKey]) {
+        promptedTimeTiebreakFingerprintsRef.current[promptKey] = true;
+      }
+      enqueueTimeTiebreakPrompt({
+        boxId,
+        fingerprint: group.fingerprint,
+        stage,
+        group,
+      });
+    });
+  };
+
+  const dismissActiveTimeTiebreakPrompt = (): void => {
+    setTimeTiebreakPromptQueue((prev) => prev.slice(1));
+  };
+
+  const submitPrevRoundsTiebreakDecision = async (
+    decision: TimeTiebreakDecision,
+    order: string[] = [],
+    ranksByName: Record<string, number> = {},
+  ): Promise<void> => {
+    if (!activeTimeTiebreakPrompt || activeTimeTiebreakPrompt.stage !== 'previous-rounds') return;
+    try {
+      setTimeTiebreakDecisionBusy(true);
+      setTimeTiebreakDecisionError(null);
+      await setPrevRoundsTiebreakDecisionApi(
+        activeTimeTiebreakPrompt.boxId,
+        decision,
+        activeTimeTiebreakPrompt.fingerprint,
+        order,
+        ranksByName,
+      );
+      const draftKey = `${activeTimeTiebreakPrompt.boxId}:${activeTimeTiebreakPrompt.fingerprint}`;
+      delete prevRoundsRankDraftsRef.current[draftKey];
+      setTimeTiebreakByBox((prev) => {
+        const existing = prev[activeTimeTiebreakPrompt.boxId];
+        const nextPrevDecisions: Record<string, TimeTiebreakDecision> = {
+          ...(existing?.prevDecisions ?? {}),
+          [activeTimeTiebreakPrompt.fingerprint]: decision,
+        };
+        const nextPrevOrders: Record<string, string[]> = {
+          ...(existing?.prevOrders ?? {}),
+        };
+        const nextPrevRanks: Record<string, Record<string, number>> = {
+          ...(existing?.prevRanks ?? {}),
+        };
+        if (decision === 'yes' && order.length > 0) {
+          nextPrevOrders[activeTimeTiebreakPrompt.fingerprint] = order;
+        } else {
+          delete nextPrevOrders[activeTimeTiebreakPrompt.fingerprint];
+        }
+        if (decision === 'yes' && Object.keys(ranksByName).length > 0) {
+          nextPrevRanks[activeTimeTiebreakPrompt.fingerprint] = ranksByName;
+        } else {
+          delete nextPrevRanks[activeTimeTiebreakPrompt.fingerprint];
+        }
+        const nextGroups =
+          existing?.eligibleGroups?.map((group) => {
+            if (group.fingerprint !== activeTimeTiebreakPrompt.fingerprint) return group;
+            if (decision === 'yes') {
+              return {
+                ...group,
+                prevRoundsDecision: 'yes' as const,
+                prevRoundsOrder: order,
+                prevRoundsRanksByName: ranksByName,
+                resolutionKind: 'previous_rounds' as const,
+                isResolved: true,
+              };
+            }
+            return {
+              ...group,
+              prevRoundsDecision: 'no' as const,
+              prevRoundsOrder: null,
+              prevRoundsRanksByName: null,
+              isResolved: false,
+              resolutionKind: null,
+            };
+          }) ?? [];
+        const nextHasEligibleTie = nextGroups.length > 0;
+        const nextIsResolved = nextGroups.every((group) => group.isResolved);
+        return {
+          ...prev,
+          [activeTimeTiebreakPrompt.boxId]: {
+            preference: existing?.preference ?? null,
+            decisions: existing?.decisions ?? {},
+            prevPreference: decision,
+            prevDecisions: nextPrevDecisions,
+            prevOrders: nextPrevOrders,
+            prevRanks: nextPrevRanks,
+            resolvedFingerprint: existing?.resolvedFingerprint ?? null,
+            resolvedDecision: existing?.resolvedDecision ?? null,
+            prevResolvedFingerprint: activeTimeTiebreakPrompt.fingerprint,
+            prevResolvedDecision: decision,
+            currentFingerprint: existing?.currentFingerprint ?? activeTimeTiebreakPrompt.fingerprint,
+            hasEligibleTie: nextHasEligibleTie,
+            isResolved: nextIsResolved,
+            eligibleGroups: nextGroups,
+            rankingRows: existing?.rankingRows ?? [],
+          },
+        };
+      });
+      if (decision === 'no') {
+        dismissActiveTimeTiebreakPrompt();
+      } else {
+        dismissActiveTimeTiebreakPrompt();
+      }
+    } catch (err) {
+      debugError('Failed to persist previous-rounds tiebreak decision', err);
+      const status = typeof (err as any)?.status === 'number' ? (err as any).status : null;
+      if (status === 401 || status === 403) {
+        clearAuth();
+        setAdminRole(null);
+        setShowAdminLogin(true);
+      }
+      setTimeTiebreakDecisionError('Failed to save decision. Please retry.');
+    } finally {
+      setTimeTiebreakDecisionBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    setTimeTiebreakDecisionError(null);
+    setTimeTiebreakDecisionBusy(false);
+    if (activeTimeTiebreakPrompt?.stage === 'previous-rounds' && activeTimeTiebreakGroup) {
+      const draftKey = `${activeTimeTiebreakPrompt.boxId}:${activeTimeTiebreakPrompt.fingerprint}`;
+      const draftInputs = prevRoundsRankDraftsRef.current[draftKey];
+      const names = activeTimeTiebreakGroup.members
+        .map((member) => member.name)
+        .filter((name, idx, arr) => !!name && arr.indexOf(name) === idx);
+      const existingMap = activeTimeTiebreakGroup.prevRoundsRanksByName ?? {};
+      const nextInputs: Record<string, string> = {};
+      names.forEach((name) => {
+        const draftValue = draftInputs?.[name];
+        const existingValue = existingMap[name];
+        if (typeof draftValue === 'string') {
+          nextInputs[name] = draftValue;
+          return;
+        }
+        nextInputs[name] =
+          typeof existingValue === 'number' && Number.isFinite(existingValue)
+            ? String(Math.trunc(existingValue))
+            : '';
+      });
+      setPrevRoundsRankInputs(nextInputs);
+    } else {
+      setPrevRoundsRankInputs({});
+    }
+  }, [
+    activeTimeTiebreakPrompt?.boxId,
+    activeTimeTiebreakPrompt?.fingerprint,
+    activeTimeTiebreakPrompt?.stage,
+    activeTimeTiebreakGroup,
+  ]);
+
+  const activePrevRoundNames =
+    activeTimeTiebreakPrompt?.stage === 'previous-rounds' && activeTimeTiebreakGroup
+      ? activeTimeTiebreakGroup.members
+          .map((member) => member.name)
+          .filter((name, index, arr) => !!name && arr.indexOf(name) === index)
+      : [];
+  const parsedPrevRoundsRanksByName = activePrevRoundNames.reduce((acc, name) => {
+    const raw = prevRoundsRankInputs[name];
+    const num = Number(raw);
+    if (Number.isFinite(num) && num > 0) {
+      acc[name] = Math.trunc(num);
+    }
+    return acc;
+  }, {} as Record<string, number>);
+  const canSubmitPrevRoundsOrder =
+    activePrevRoundNames.length > 0 &&
+    activePrevRoundNames.every((name) => {
+      const raw = prevRoundsRankInputs[name];
+      const num = Number(raw);
+      return Number.isFinite(num) && num > 0;
+    });
+
+  const updatePrevRoundsRankInput = (name: string, value: string): void => {
+    setPrevRoundsRankInputs((prev) => ({ ...prev, [name]: value }));
+    if (!activeTimeTiebreakPrompt || activeTimeTiebreakPrompt.stage !== 'previous-rounds') return;
+    const draftKey = `${activeTimeTiebreakPrompt.boxId}:${activeTimeTiebreakPrompt.fingerprint}`;
+    const existing = prevRoundsRankDraftsRef.current[draftKey] ?? {};
+    prevRoundsRankDraftsRef.current[draftKey] = {
+      ...existing,
+      [name]: value,
+    };
+  };
+
+  const submitPrevRoundsSelection = async (): Promise<void> => {
+    if (!activeTimeTiebreakGroup) return;
+    if (!canSubmitPrevRoundsOrder) return;
+    await submitPrevRoundsTiebreakDecision('yes', [], parsedPrevRoundsRanksByName);
+  };
+
   // Prefetch the current backend state per box to populate:
   // - `sessionId` (isolates state between boxes)
   // - `boxVersion` (optimistic concurrency / stale detection)
@@ -479,13 +1099,14 @@ const ControlPanel: FC = () => {
             if (typeof st?.timeCriterionEnabled === 'boolean') {
               syncTimeCriterion(idx, st.timeCriterionEnabled);
             }
+            applyTimeTiebreakSnapshot(idx, st as Record<string, unknown>);
           }
         } catch (err) {
           debugError(`Failed to prefetch state/session for box ${idx}`, err);
         }
       })();
     });
-  }, [listboxes]);
+  }, [listboxes, adminRole]);
 
   // Create/maintain per-box WebSocket connections and translate incoming messages into React state.
   // Dependencies: this effect re-runs when `listboxes` changes (box add/delete), and cleans up orphan sockets.
@@ -584,6 +1205,161 @@ const ControlPanel: FC = () => {
                 safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
               }
               break;
+            case 'SET_TIME_TIEBREAK_DECISION': {
+              const decision = parseTimeTiebreakDecision((msg as any).timeTiebreakDecision);
+              const fingerprint =
+                typeof (msg as any).timeTiebreakFingerprint === 'string'
+                  ? (msg as any).timeTiebreakFingerprint
+                  : null;
+              if (decision && fingerprint) {
+                setTimeTiebreakByBox((prev) => {
+                  const existing = prev[idx];
+                  const nextDecisions: Record<string, TimeTiebreakDecision> = {
+                    ...(existing?.decisions ?? {}),
+                    [fingerprint]: decision,
+                  };
+                  const nextGroups =
+                    existing?.eligibleGroups?.map((group) =>
+                      group.fingerprint === fingerprint
+                        ? {
+                            ...group,
+                            timeDecision: decision,
+                            resolvedDecision: decision,
+                            resolutionKind: 'time' as const,
+                            isResolved: true,
+                          }
+                        : group,
+                    ) ?? [];
+                  return {
+                    ...prev,
+                    [idx]: {
+                      preference: decision,
+                      decisions: nextDecisions,
+                      prevPreference: existing?.prevPreference ?? null,
+                      prevDecisions: existing?.prevDecisions ?? {},
+                      prevOrders: existing?.prevOrders ?? {},
+                      prevRanks: existing?.prevRanks ?? {},
+                      resolvedFingerprint: fingerprint,
+                      resolvedDecision: decision,
+                      prevResolvedFingerprint: existing?.prevResolvedFingerprint ?? null,
+                      prevResolvedDecision: existing?.prevResolvedDecision ?? null,
+                      currentFingerprint: existing?.currentFingerprint ?? fingerprint,
+                      hasEligibleTie:
+                        typeof existing?.hasEligibleTie === 'boolean'
+                          ? existing.hasEligibleTie
+                          : nextGroups.length > 0,
+                      isResolved: nextGroups.length > 0 ? nextGroups.every((g) => g.isResolved) : true,
+                      eligibleGroups: nextGroups,
+                      rankingRows: existing?.rankingRows ?? [],
+                    },
+                  };
+                });
+              }
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
+              }
+              break;
+            }
+            case 'SET_PREV_ROUNDS_TIEBREAK_DECISION': {
+              const decision = parseTimeTiebreakDecision((msg as any).prevRoundsTiebreakDecision);
+              const fingerprint =
+                typeof (msg as any).prevRoundsTiebreakFingerprint === 'string'
+                  ? (msg as any).prevRoundsTiebreakFingerprint
+                  : null;
+              const order = Array.isArray((msg as any).prevRoundsTiebreakOrder)
+                ? ((msg as any).prevRoundsTiebreakOrder as unknown[])
+                    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+                    .filter((item, index, arr) => !!item && arr.indexOf(item) === index)
+                : [];
+              const ranksByName =
+                (msg as any).prevRoundsTiebreakRanksByName &&
+                typeof (msg as any).prevRoundsTiebreakRanksByName === 'object'
+                  ? Object.entries((msg as any).prevRoundsTiebreakRanksByName as Record<string, unknown>).reduce(
+                      (acc, [name, rank]) => {
+                        if (typeof name !== 'string' || !name.trim()) return acc;
+                        const num = Number(rank);
+                        if (!Number.isFinite(num) || num <= 0) return acc;
+                        acc[name.trim()] = Math.trunc(num);
+                        return acc;
+                      },
+                      {} as Record<string, number>,
+                    )
+                  : {};
+              if (decision && fingerprint) {
+                setTimeTiebreakByBox((prev) => {
+                  const existing = prev[idx];
+                  const nextPrevDecisions: Record<string, TimeTiebreakDecision> = {
+                    ...(existing?.prevDecisions ?? {}),
+                    [fingerprint]: decision,
+                  };
+                  const nextPrevOrders: Record<string, string[]> = {
+                    ...(existing?.prevOrders ?? {}),
+                  };
+                  const nextPrevRanks: Record<string, Record<string, number>> = {
+                    ...(existing?.prevRanks ?? {}),
+                  };
+                  if (decision === 'yes' && order.length > 0) {
+                    nextPrevOrders[fingerprint] = order;
+                  } else {
+                    delete nextPrevOrders[fingerprint];
+                  }
+                  if (decision === 'yes' && Object.keys(ranksByName).length > 0) {
+                    nextPrevRanks[fingerprint] = ranksByName;
+                  } else {
+                    delete nextPrevRanks[fingerprint];
+                  }
+                  const nextGroups =
+                    existing?.eligibleGroups?.map((group) => {
+                      if (group.fingerprint !== fingerprint) return group;
+                      if (decision === 'yes') {
+                        return {
+                          ...group,
+                          prevRoundsDecision: 'yes' as const,
+                          prevRoundsOrder: order,
+                          prevRoundsRanksByName: ranksByName,
+                          resolutionKind: 'previous_rounds' as const,
+                          isResolved: true,
+                        };
+                      }
+                      return {
+                        ...group,
+                        prevRoundsDecision: 'no' as const,
+                        prevRoundsOrder: null,
+                        prevRoundsRanksByName: null,
+                        isResolved: false,
+                        resolutionKind: null,
+                      };
+                    }) ?? [];
+                  return {
+                    ...prev,
+                    [idx]: {
+                      preference: existing?.preference ?? null,
+                      decisions: existing?.decisions ?? {},
+                      prevPreference: decision,
+                      prevDecisions: nextPrevDecisions,
+                      prevOrders: nextPrevOrders,
+                      prevRanks: nextPrevRanks,
+                      resolvedFingerprint: existing?.resolvedFingerprint ?? null,
+                      resolvedDecision: existing?.resolvedDecision ?? null,
+                      prevResolvedFingerprint: fingerprint,
+                      prevResolvedDecision: decision,
+                      currentFingerprint: existing?.currentFingerprint ?? fingerprint,
+                      hasEligibleTie:
+                        typeof existing?.hasEligibleTie === 'boolean'
+                          ? existing.hasEligibleTie
+                          : nextGroups.length > 0,
+                      isResolved: nextGroups.length > 0 ? nextGroups.every((g) => g.isResolved) : true,
+                      eligibleGroups: nextGroups,
+                      rankingRows: existing?.rankingRows ?? [],
+                    },
+                  };
+                });
+              }
+              if (typeof msg.boxVersion === 'number') {
+                safeSetItem(`boxVersion-${idx}`, String(msg.boxVersion));
+              }
+              break;
+            }
             case 'REQUEST_STATE':
               // Another client/tab asked for our current view of the box state.
               // We respond with a lightweight snapshot to speed up hydration without extra HTTP requests.
@@ -678,6 +1454,7 @@ const ControlPanel: FC = () => {
               if (typeof msg.timeCriterionEnabled === 'boolean') {
                 syncTimeCriterion(idx, msg.timeCriterionEnabled);
               }
+              applyTimeTiebreakSnapshot(idx, msg as unknown as Record<string, unknown>);
               break;
             default:
               break;
@@ -1390,6 +2167,42 @@ const ControlPanel: FC = () => {
       });
       return next;
     });
+    setTimeTiebreakByBox((prev) => {
+      const next: Record<number, TimeTiebreakSnapshot> = {};
+      Object.entries(prev).forEach(([key, value]) => {
+        const idx = Number(key);
+        if (Number.isNaN(idx) || idx === index) return;
+        next[idx > index ? idx - 1 : idx] = value;
+      });
+      return next;
+    });
+    setTimeTiebreakPromptQueue((prev) => {
+      const nextQueue = prev
+        .filter((prompt) => prompt.boxId !== index)
+        .map((prompt) => ({
+          ...prompt,
+          boxId: prompt.boxId > index ? prompt.boxId - 1 : prompt.boxId,
+        }));
+      const nextPromptedFingerprints: Record<string, boolean> = {};
+      nextQueue.forEach((prompt) => {
+        nextPromptedFingerprints[
+          promptFingerprintKey(prompt.stage, prompt.fingerprint, prompt.boxId)
+        ] = true;
+      });
+      promptedTimeTiebreakFingerprintsRef.current = nextPromptedFingerprints;
+      return nextQueue;
+    });
+    const remappedDrafts: Record<string, Record<string, string>> = {};
+    Object.entries(prevRoundsRankDraftsRef.current).forEach(([key, value]) => {
+      const parts = key.split(':');
+      if (parts.length < 2) return;
+      const draftBoxId = Number(parts[0]);
+      if (!Number.isFinite(draftBoxId) || draftBoxId === index) return;
+      const fingerprint = parts.slice(1).join(':');
+      const nextBoxId = draftBoxId > index ? draftBoxId - 1 : draftBoxId;
+      remappedDrafts[`${nextBoxId}:${fingerprint}`] = value;
+    });
+    prevRoundsRankDraftsRef.current = remappedDrafts;
     // remove current climber for deleted box
     setCurrentClimbers((prev) => {
       const { [index]: _, ...rest } = prev;
@@ -1515,6 +2328,43 @@ const ControlPanel: FC = () => {
         // Pre-init state has no active climber until INIT_ROUTE is called again.
         return { ...prev, [boxIdx]: '' };
       });
+      setTimeTiebreakByBox((prev) => ({
+        ...prev,
+        [boxIdx]: {
+          preference: null,
+          decisions: {},
+          prevPreference: null,
+          prevDecisions: {},
+          prevOrders: {},
+          prevRanks: {},
+          resolvedFingerprint: null,
+          resolvedDecision: null,
+          prevResolvedFingerprint: null,
+          prevResolvedDecision: null,
+          currentFingerprint: null,
+          hasEligibleTie: false,
+          isResolved: true,
+          eligibleGroups: [],
+          rankingRows: [],
+        },
+      }));
+      setTimeTiebreakPromptQueue((prev) => {
+        const removedPromptKeys = new Set(
+          prev
+            .filter((prompt) => prompt.boxId === boxIdx)
+            .map((prompt) => promptFingerprintKey(prompt.stage, prompt.fingerprint, boxIdx)),
+        );
+        const groupsForBox = timeTiebreakByBox[boxIdx]?.eligibleGroups ?? [];
+        groupsForBox.forEach((group) => {
+          removedPromptKeys.add(promptFingerprintKey('previous-rounds', group.fingerprint, boxIdx));
+          removedPromptKeys.add(promptFingerprintKey('time', group.fingerprint, boxIdx));
+        });
+        removedPromptKeys.forEach((promptKey) => {
+          delete promptedTimeTiebreakFingerprintsRef.current[promptKey];
+        });
+        return prev.filter((prompt) => prompt.boxId !== boxIdx);
+      });
+      clearPrevRoundsDraftsForBox(boxIdx);
     }
     if (opts.resetTimer) {
       // If this box timer is currently running, the headless timer engine might write one more tick
@@ -2204,6 +3054,7 @@ const ControlPanel: FC = () => {
     if (!box) return;
     const ranking = safeGetJSON(`ranking-${boxIdx}`, {});
     const rankingTimes = safeGetJSON(`rankingTimes-${boxIdx}`, {});
+    const tiebreakState = timeTiebreakByBox[boxIdx];
     const clubMap: Record<string, string> = {};
     (box.concurenti || []).forEach((c) => {
       clubMap[c.nume] = c.club ?? '';
@@ -2220,6 +3071,23 @@ const ControlPanel: FC = () => {
           clubs: clubMap,
           times: rankingTimes,
           use_time_tiebreak: getTimeCriterionEnabled(boxIdx),
+          route_index: Number(box.routeIndex) || Number(box.routesCount) || 1,
+          holds_counts: Array.isArray(box.holdsCounts) ? box.holdsCounts : [],
+          active_holds_count:
+            Array.isArray(box.holdsCounts) && Number(box.routeIndex) > 0
+              ? box.holdsCounts[Math.max(0, Number(box.routeIndex) - 1)] ?? box.holdsCount
+              : box.holdsCount,
+          box_id: boxIdx,
+          time_tiebreak_resolved_decision: tiebreakState?.resolvedDecision ?? null,
+          time_tiebreak_resolved_fingerprint: tiebreakState?.resolvedFingerprint ?? null,
+          time_tiebreak_preference: tiebreakState?.preference ?? null,
+          time_tiebreak_decisions: tiebreakState?.decisions ?? {},
+          prev_rounds_tiebreak_resolved_decision: tiebreakState?.prevResolvedDecision ?? null,
+          prev_rounds_tiebreak_resolved_fingerprint: tiebreakState?.prevResolvedFingerprint ?? null,
+          prev_rounds_tiebreak_preference: tiebreakState?.prevPreference ?? null,
+          prev_rounds_tiebreak_decisions: tiebreakState?.prevDecisions ?? {},
+          prev_rounds_tiebreak_orders: tiebreakState?.prevOrders ?? {},
+          prev_rounds_tiebreak_ranks_by_fingerprint: tiebreakState?.prevRanks ?? {},
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2261,97 +3129,19 @@ const ControlPanel: FC = () => {
       .slice(0, 3);
   };
 
-  // Convert per-route scores into "rank points" (1 = best) with proper tie handling.
-  const calcRankPointsPerRoute = (
-    scoresByName: Record<string, Array<number | undefined>>,
-    nRoutes: number,
-  ): { rankPoints: Record<string, (number | undefined)[]>; nCompetitors: number } => {
-    const rankPoints: Record<string, (number | undefined)[]> = {};
-    let nCompetitors = 0;
-
-    for (let r = 0; r < nRoutes; r++) {
-      const list = Object.entries(scoresByName)
-        .map(([nume, arr]) => {
-          const raw = Array.isArray(arr) && r < arr.length ? arr[r] : undefined;
-          const score = typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
-          return score === undefined ? null : { nume, score };
-        })
-        .filter((x): x is { nume: string; score: number } => !!x);
-
-      list.sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
-      });
-
-      let pos = 1;
-      for (let i = 0; i < list.length; ) {
-        const current = list[i];
-        let j = i;
-        while (j < list.length && list[j].score === current.score) j++;
-        const tieCount = j - i;
-        const first = pos;
-        const last = pos + tieCount - 1;
-        const avgRank = (first + last) / 2;
-        for (let k = i; k < j; k++) {
-          const x = list[k];
-          if (!rankPoints[x.nume]) rankPoints[x.nume] = Array(nRoutes).fill(undefined);
-          rankPoints[x.nume][r] = avgRank;
-        }
-        pos += tieCount;
-        i = j;
-      }
-
-      nCompetitors = Math.max(nCompetitors, list.length);
-    }
-
-    return { rankPoints, nCompetitors };
-  };
-
-  // Compute a geometric mean across routes (missing routes are penalized as "worse than last").
-  const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: number): number => {
-    const filled = arr.map((v) => v ?? nCompetitors + 1);
-    while (filled.length < nRoutes) filled.push(nCompetitors + 1);
-    const prod = filled.reduce((p, x) => p * x, 1);
-    return Number(Math.pow(prod, 1 / nRoutes).toFixed(3));
-  };
-
   // Offline podium computation:
-  // - Prefer cached `ranking-${boxId}` history
+  // - Prefer latest server-computed lead ranking rows from snapshot state
   // - Otherwise fall back to persisted `podium-${boxId}` (if any)
   const computeLocalPodiumForBox = (boxIdx: number): CeremonyWinner[] => {
     const box = listboxesRef.current[boxIdx] || listboxes[boxIdx];
-    const nRoutes = Math.max(1, Number(box?.routesCount) || 1);
-    const rawScores = safeGetJSON(`ranking-${boxIdx}`, {});
-    const hasScores =
-      !!rawScores &&
-      typeof rawScores === 'object' &&
-      Object.keys(rawScores as Record<string, unknown>).length > 0;
-
-    if (!hasScores) {
+    const tiebreakState = timeTiebreakByBox[boxIdx];
+    const rankingRows = Array.isArray(tiebreakState?.rankingRows)
+      ? tiebreakState.rankingRows
+      : [];
+    if (!rankingRows.length) {
       const cached = normalizeCeremonyWinners(safeGetJSON(`podium-${boxIdx}`, []));
       return cached;
     }
-
-    const scoresByName: Record<string, Array<number | undefined>> = {};
-    for (const [name, arr] of Object.entries(rawScores as Record<string, unknown>)) {
-      if (!name) continue;
-      if (!Array.isArray(arr)) continue;
-      scoresByName[name] = arr.map((v) =>
-        typeof v === 'number' && Number.isFinite(v) ? v : undefined,
-      );
-    }
-
-    const { rankPoints, nCompetitors } = calcRankPointsPerRoute(scoresByName, nRoutes);
-    const rows = Object.keys(rankPoints).map((nume) => {
-      const rp = rankPoints[nume] || [];
-      const total = geomMean(rp, nRoutes, nCompetitors);
-      return { nume, total };
-    });
-
-    rows.sort((a, b) => {
-      if (a.total !== b.total) return a.total - b.total;
-      return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
-    });
 
     const clubByKey: Record<string, string> = {};
     (box?.concurenti || []).forEach((c) => {
@@ -2362,10 +3152,10 @@ const ControlPanel: FC = () => {
     });
 
     const colors = ['#ffd700', '#c0c0c0', '#cd7f32'];
-    const podium = rows.slice(0, 3).map((c, i) => {
-      const key = normalizeCompetitorKey(c.nume);
+    const podium = rankingRows.slice(0, 3).map((c, i) => {
+      const key = normalizeCompetitorKey(c.name);
       return {
-        name: c.nume,
+        name: c.name,
         club: (key && clubByKey[key]) || '',
         color: colors[i],
       };
@@ -2832,7 +3622,6 @@ const ControlPanel: FC = () => {
     { id: 'export', label: 'Export', icon: ArrowDownTrayIcon },
     { id: 'audit', label: 'Audit', icon: ClipboardDocumentListIcon },
   ];
-
   return (
     <div className={styles.container}>
       {/* Admin auth overlay (blocks admin-only actions when not logged in). */}
@@ -3118,11 +3907,16 @@ const ControlPanel: FC = () => {
                   )}
 
                   {adminActionsView === 'upload' && (
-                    <ModalUpload
-                      isOpen={adminActionsView === 'upload'}
-                      onClose={() => setAdminActionsView('actions')}
-                      onUpload={handleUpload}
-                    />
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-[repeat(1,minmax(320px,560px))] gap-3">
+                        <ModalUpload
+                          isOpen={adminActionsView === 'upload'}
+                          embedded
+                          onClose={() => setAdminActionsView('actions')}
+                          onUpload={handleUpload}
+                        />
+                      </div>
+                    </div>
                   )}
 
                   {adminActionsView === 'export' && (
@@ -3151,6 +3945,146 @@ const ControlPanel: FC = () => {
         </section>
 
       {/* Global modals used by Admin tools and box cards. */}
+      {activeTimeTiebreakPrompt && (
+        <div className={styles.modalOverlay}>
+          <div className={styles.modalCard}>
+            <div className={styles.modalHeader}>
+              <div>
+                <div className={styles.modalTitle}>
+                  {activeTimeTiebreakPrompt.stage === 'previous-rounds'
+                    ? 'Previous Rounds Tiebreak?'
+                    : 'Apply Time Tiebreak?'}
+                </div>
+                <div className={styles.modalSubtitle}>
+                  {`Category: ${sanitizeBoxName(
+                    listboxes[activeTimeTiebreakPrompt.boxId]?.categorie ||
+                      `Box ${activeTimeTiebreakPrompt.boxId}`,
+                  )}`}
+                </div>
+              </div>
+            </div>
+            <div className={styles.modalContent}>
+              <div className={styles.modalAlert}>
+                {activeTimeTiebreakPrompt.stage === 'previous-rounds'
+                  ? activeTimeTiebreakGroup?.affectsPodium
+                    ? 'Eligible tie detected in top 3. Enter previous-round ranks to resolve.'
+                    : 'Tie detected. Enter previous-round ranks to resolve.'
+                  : 'Time tiebreak is applied automatically (YES by default).'}
+              </div>
+              {activeTimeTiebreakGroup && (
+                <div className={styles.modalField}>
+                  <div
+                    style={{
+                      border: '1px solid var(--border-medium)',
+                      borderRadius: 'var(--radius-md)',
+                      padding: '10px 12px',
+                      background: 'rgba(0, 0, 0, 0.25)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        color: 'var(--text-secondary)',
+                        marginBottom: '8px',
+                      }}
+                    >
+                      {activeTimeTiebreakGroup.context === 'overall' ? 'Overall' : 'Active route'} tie on rank{' '}
+                      {activeTimeTiebreakGroup.rank}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {activeTimeTiebreakGroup.members.map((member) => (
+                        <div
+                          key={`${activeTimeTiebreakGroup.context}-${activeTimeTiebreakGroup.rank}-${member.name}`}
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'minmax(120px,1fr) auto auto',
+                            gap: '8px',
+                            fontSize: '13px',
+                            color: 'var(--text-primary)',
+                          }}
+                        >
+                          <span>{sanitizeCompetitorName(member.name)}</span>
+                          <span style={{ color: 'var(--text-secondary)' }}>
+                            {activeTimeTiebreakGroup.context === 'overall'
+                              ? `Total ${typeof member.value === 'number' ? member.value.toFixed(3) : '—'}`
+                              : `Score ${typeof member.value === 'number' ? member.value.toFixed(1) : '—'}`}
+                          </span>
+                          <span style={{ color: 'var(--text-secondary)', textAlign: 'right' }}>
+                            Time {formatRegisteredSeconds(member.time)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {activeTimeTiebreakPrompt.stage === 'previous-rounds' && (
+                <div className={styles.modalField}>
+                  <div className={styles.modalLabel}>
+                    Set previous-round rank for each tied athlete (1 = best)
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {activePrevRoundNames.map((name) => (
+                      <label key={`prev-rank-${name}`} className={styles.modalField}>
+                        <span className={styles.modalLabel}>{sanitizeCompetitorName(name)}</span>
+                        <input
+                          className={styles.modalInput}
+                          type="number"
+                          min={1}
+                          step={1}
+                          placeholder="Rank (e.g. 1, 2, 2)"
+                          value={prevRoundsRankInputs[name] ?? ''}
+                          onChange={(e) => updatePrevRoundsRankInput(name, e.target.value)}
+                          disabled={timeTiebreakDecisionBusy}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {timeTiebreakDecisionError && (
+                <div className={styles.modalAlertError}>{timeTiebreakDecisionError}</div>
+              )}
+              <div className={styles.modalActions}>
+                {activeTimeTiebreakPrompt.stage === 'previous-rounds' && (
+                  <>
+                    <button
+                      className="modern-btn modern-btn-ghost"
+                      onClick={dismissActiveTimeTiebreakPrompt}
+                      disabled={timeTiebreakDecisionBusy}
+                      type="button"
+                    >
+                      Later
+                    </button>
+                    <button
+                      className="modern-btn modern-btn-primary"
+                      onClick={() => void submitPrevRoundsSelection()}
+                      disabled={timeTiebreakDecisionBusy || !canSubmitPrevRoundsOrder}
+                      type="button"
+                    >
+                      Confirm TB Prev
+                    </button>
+                  </>
+                )}
+                {activeTimeTiebreakPrompt.stage === 'time' && (
+                  <>
+                    <button
+                      className="modern-btn modern-btn-ghost"
+                      onClick={dismissActiveTimeTiebreakPrompt}
+                      disabled={timeTiebreakDecisionBusy}
+                      type="button"
+                    >
+                      Close
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Modify score modal: manual adjustments after a score was submitted. */}
       <ModalModifyScore
         isOpen={showModifyModal && editList.length > 0}

@@ -39,10 +39,6 @@ interface TimesByName {
   [name: string]: (number | undefined)[];
 }
 
-interface RankInfo {
-  nume: string;
-  score: number;
-}
 
 interface TimerMessage {
   type: 'START_TIMER' | 'STOP_TIMER' | 'RESUME_TIMER';
@@ -186,73 +182,6 @@ const RouteProgress: FC<RouteProgressProps> = ({
   );
 };
 
-// -------------------- IFSC-style ranking helpers --------------------
-// Used for multi-route contests:
-// - For each route, compute rank points per competitor (ties share average rank)
-// - Aggregate routes via geometric mean of rank points
-/** Returns `{ [name]: [rankPoints...] }` and the total competitor count. */
-const calcRankPointsPerRoute = (
-  scoresByName: ScoresByName,
-  routeIdx: number,
-): { rankPoints: { [name: string]: (number | undefined)[] }; nCompetitors: number } => {
-  const rankPoints: { [name: string]: (number | undefined)[] } = {};
-  const nRoutes = routeIdx; // câte rute am până acum
-  let nCompetitors = 0;
-
-  // pentru fiecare rută (0‑based)
-  for (let r = 0; r < nRoutes; r++) {
-    // colectează scorurile existente
-    const list: RankInfo[] = Object.entries(scoresByName)
-      .filter(([, arr]) => arr[r] !== undefined)
-      .map(([nume, arr]) => ({
-        nume,
-        score: arr[r],
-      }));
-
-    // sortează descrescător
-    list.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
-    });
-
-    // parcurge şi atribuie rank‑ul cu tie‑handling
-    let pos = 1;
-    for (let i = 0; i < list.length; ) {
-      const current = list[i];
-      let j = i;
-      while (j < list.length && list[j].score === current.score) {
-        j++;
-      }
-      const tieCount = j - i;
-      const first = pos;
-      const last = pos + tieCount - 1;
-      const avgRank = (first + last) / 2; // media aritmetică
-      for (let k = i; k < j; k++) {
-        const x = list[k];
-        if (!rankPoints[x.nume]) rankPoints[x.nume] = Array(nRoutes).fill(undefined);
-        rankPoints[x.nume][r] = avgRank;
-      }
-      pos += tieCount;
-      i = j;
-    }
-    nCompetitors = Math.max(nCompetitors, list.length);
-  }
-
-  return { rankPoints, nCompetitors };
-};
-
-/** Geometric mean of rank points (rounded to 3 decimals). */
-const geomMean = (arr: (number | undefined)[], nRoutes: number, nCompetitors: number): number => {
-  // lipsă => loc maxim (nCompetitors + 1)
-  const filled = arr.map((v) => v ?? nCompetitors + 1);
-  if (filled.length < nRoutes) {
-    // padding pentru rute lipsă
-    while (filled.length < nRoutes) filled.push(nCompetitors + 1);
-  }
-  const prod = filled.reduce((p, x) => p * x, 1);
-  return Number(Math.pow(prod, 1 / nRoutes).toFixed(3));
-};
-
 const ContestPage: FC = () => {
   // Box id comes from the route (HashRouter). Keep as string for storage keys; convert to number when needed.
   const { boxId: boxIdParam } = useParams<{ boxId: string }>();
@@ -327,6 +256,27 @@ const ContestPage: FC = () => {
   const [timeCriterionEnabled, setTimeCriterionEnabled] = useState<boolean>(
     () => readTimeCriterionEnabled(),
   );
+  const [timeTiebreakPreference, setTimeTiebreakPreference] = useState<'yes' | 'no' | null>(null);
+  const [timeTiebreakDecisions, setTimeTiebreakDecisions] = useState<Record<string, 'yes' | 'no'>>({});
+  const [prevRoundsTiebreakPreference, setPrevRoundsTiebreakPreference] = useState<'yes' | 'no' | null>(null);
+  const [prevRoundsTiebreakDecisions, setPrevRoundsTiebreakDecisions] = useState<Record<string, 'yes' | 'no'>>({});
+  const [prevRoundsTiebreakOrders, setPrevRoundsTiebreakOrders] = useState<Record<string, string[]>>({});
+  const [prevRoundsTiebreakRanks, setPrevRoundsTiebreakRanks] = useState<Record<string, Record<string, number>>>({});
+  const [prevRoundsTiebreakResolvedFingerprint, setPrevRoundsTiebreakResolvedFingerprint] = useState<string | null>(null);
+  const [prevRoundsTiebreakResolvedDecision, setPrevRoundsTiebreakResolvedDecision] = useState<'yes' | 'no' | null>(null);
+  const [timeTiebreakCurrentFingerprint, setTimeTiebreakCurrentFingerprint] = useState<string | null>(null);
+  const [timeTiebreakHasEligibleTie, setTimeTiebreakHasEligibleTie] = useState<boolean>(false);
+  const [timeTiebreakIsResolved, setTimeTiebreakIsResolved] = useState<boolean>(false);
+  const [timeTiebreakResolvedFingerprint, setTimeTiebreakResolvedFingerprint] = useState<string | null>(null);
+  const [timeTiebreakResolvedDecision, setTimeTiebreakResolvedDecision] = useState<'yes' | 'no' | null>(null);
+  const [leadRankingRows, setLeadRankingRows] = useState<
+    Array<{
+      name: string;
+      rank: number;
+      tb_time?: boolean;
+      tb_prev?: boolean;
+    }>
+  >([]);
 
   // --- Timer sync bridge (BroadcastChannel + localStorage fallback) ---
   // Allows multiple tabs (ControlPanel/JudgePage/ContestPage) to stay in sync without tight coupling.
@@ -491,6 +441,127 @@ const ContestPage: FC = () => {
           setTimeCriterionEnabled(msg.timeCriterionEnabled);
           safeSetItem(`timeCriterionEnabled-${boxId}`, msg.timeCriterionEnabled ? 'on' : 'off');
         }
+        setTimeTiebreakPreference(
+          (msg as any).timeTiebreakPreference === 'yes' || (msg as any).timeTiebreakPreference === 'no'
+            ? (msg as any).timeTiebreakPreference
+            : null,
+        );
+        setTimeTiebreakResolvedFingerprint(
+          typeof (msg as any).timeTiebreakResolvedFingerprint === 'string'
+            ? (msg as any).timeTiebreakResolvedFingerprint
+            : null,
+        );
+        setTimeTiebreakResolvedDecision(
+          (msg as any).timeTiebreakResolvedDecision === 'yes' ||
+            (msg as any).timeTiebreakResolvedDecision === 'no'
+            ? (msg as any).timeTiebreakResolvedDecision
+            : null,
+        );
+        if ((msg as any).timeTiebreakDecisions && typeof (msg as any).timeTiebreakDecisions === 'object') {
+          const next: Record<string, 'yes' | 'no'> = {};
+          Object.entries((msg as any).timeTiebreakDecisions as Record<string, unknown>).forEach(
+            ([fingerprint, decision]) => {
+              if (!fingerprint) return;
+              if (decision === 'yes' || decision === 'no') {
+                next[fingerprint] = decision;
+              }
+            },
+          );
+          setTimeTiebreakDecisions(next);
+        }
+        setPrevRoundsTiebreakPreference(
+          (msg as any).prevRoundsTiebreakPreference === 'yes' ||
+            (msg as any).prevRoundsTiebreakPreference === 'no'
+            ? (msg as any).prevRoundsTiebreakPreference
+            : null,
+        );
+        setPrevRoundsTiebreakResolvedFingerprint(
+          typeof (msg as any).prevRoundsTiebreakResolvedFingerprint === 'string'
+            ? (msg as any).prevRoundsTiebreakResolvedFingerprint
+            : null,
+        );
+        setPrevRoundsTiebreakResolvedDecision(
+          (msg as any).prevRoundsTiebreakResolvedDecision === 'yes' ||
+            (msg as any).prevRoundsTiebreakResolvedDecision === 'no'
+            ? (msg as any).prevRoundsTiebreakResolvedDecision
+            : null,
+        );
+        if (
+          (msg as any).prevRoundsTiebreakDecisions &&
+          typeof (msg as any).prevRoundsTiebreakDecisions === 'object'
+        ) {
+          const nextPrev: Record<string, 'yes' | 'no'> = {};
+          Object.entries((msg as any).prevRoundsTiebreakDecisions as Record<string, unknown>).forEach(
+            ([fingerprint, decision]) => {
+              if (!fingerprint) return;
+              if (decision === 'yes' || decision === 'no') {
+                nextPrev[fingerprint] = decision;
+              }
+            },
+          );
+          setPrevRoundsTiebreakDecisions(nextPrev);
+        }
+        if (
+          (msg as any).prevRoundsTiebreakOrders &&
+          typeof (msg as any).prevRoundsTiebreakOrders === 'object'
+        ) {
+          const nextOrders: Record<string, string[]> = {};
+          Object.entries((msg as any).prevRoundsTiebreakOrders as Record<string, unknown>).forEach(
+            ([fingerprint, order]) => {
+              if (!fingerprint || !Array.isArray(order)) return;
+              const clean = order
+                .map((item) => (typeof item === 'string' ? item.trim() : ''))
+                .filter((item, idx, arr) => !!item && arr.indexOf(item) === idx);
+              if (clean.length > 0) nextOrders[fingerprint] = clean;
+            },
+          );
+          setPrevRoundsTiebreakOrders(nextOrders);
+        }
+        if (
+          (msg as any).prevRoundsTiebreakRanks &&
+          typeof (msg as any).prevRoundsTiebreakRanks === 'object'
+        ) {
+          const nextRanks: Record<string, Record<string, number>> = {};
+          Object.entries((msg as any).prevRoundsTiebreakRanks as Record<string, unknown>).forEach(
+            ([fingerprint, rawMap]) => {
+              if (!fingerprint || !rawMap || typeof rawMap !== 'object') return;
+              const clean = Object.entries(rawMap as Record<string, unknown>).reduce(
+                (acc, [name, rank]) => {
+                  if (typeof name !== 'string' || !name.trim()) return acc;
+                  const num = Number(rank);
+                  if (!Number.isFinite(num) || num <= 0) return acc;
+                  acc[name.trim()] = Math.trunc(num);
+                  return acc;
+                },
+                {} as Record<string, number>,
+              );
+              if (Object.keys(clean).length > 0) nextRanks[fingerprint] = clean;
+            },
+          );
+          setPrevRoundsTiebreakRanks(nextRanks);
+        }
+        setTimeTiebreakCurrentFingerprint(
+          typeof (msg as any).timeTiebreakCurrentFingerprint === 'string'
+            ? (msg as any).timeTiebreakCurrentFingerprint
+            : null,
+        );
+        setTimeTiebreakHasEligibleTie(!!(msg as any).timeTiebreakHasEligibleTie);
+        setTimeTiebreakIsResolved(!!(msg as any).timeTiebreakIsResolved);
+        if (Array.isArray((msg as any).leadRankingRows)) {
+          const rows = ((msg as any).leadRankingRows as unknown[])
+            .map((raw) => (raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null))
+            .filter((raw): raw is Record<string, unknown> => !!raw)
+            .map((raw) => ({
+              name: typeof raw.name === 'string' ? raw.name : '',
+              rank: Math.max(1, Number(raw.rank || 1)),
+              tb_time: !!raw.tb_time,
+              tb_prev: !!raw.tb_prev,
+            }))
+            .filter((row) => !!row.name);
+          setLeadRankingRows(rows);
+        } else {
+          setLeadRankingRows([]);
+        }
         if (typeof (msg as any).judgeChief === 'string') {
           setJudgeChief((msg as any).judgeChief || '—');
         }
@@ -507,6 +578,84 @@ const ContestPage: FC = () => {
         if (typeof msg.timeCriterionEnabled === 'boolean') {
           setTimeCriterionEnabled(msg.timeCriterionEnabled);
           safeSetItem(`timeCriterionEnabled-${boxId}`, msg.timeCriterionEnabled ? 'on' : 'off');
+        }
+      }
+      if (msg.type === 'SET_TIME_TIEBREAK_DECISION') {
+        if (+msg.boxId !== Number(boxId)) return;
+        if ((msg as any).timeTiebreakDecision === 'yes' || (msg as any).timeTiebreakDecision === 'no') {
+          setTimeTiebreakPreference((msg as any).timeTiebreakDecision);
+          setTimeTiebreakResolvedDecision((msg as any).timeTiebreakDecision);
+          setTimeTiebreakIsResolved(true);
+        }
+        if (typeof (msg as any).timeTiebreakFingerprint === 'string') {
+          setTimeTiebreakResolvedFingerprint((msg as any).timeTiebreakFingerprint);
+          setTimeTiebreakCurrentFingerprint((msg as any).timeTiebreakFingerprint);
+          setTimeTiebreakHasEligibleTie(true);
+          if ((msg as any).timeTiebreakDecision === 'yes' || (msg as any).timeTiebreakDecision === 'no') {
+            setTimeTiebreakDecisions((prev) => ({
+              ...prev,
+              [(msg as any).timeTiebreakFingerprint]: (msg as any).timeTiebreakDecision,
+            }));
+          }
+        }
+      }
+      if (msg.type === 'SET_PREV_ROUNDS_TIEBREAK_DECISION') {
+        if (+msg.boxId !== Number(boxId)) return;
+        if (
+          (msg as any).prevRoundsTiebreakDecision === 'yes' ||
+          (msg as any).prevRoundsTiebreakDecision === 'no'
+        ) {
+          setPrevRoundsTiebreakPreference((msg as any).prevRoundsTiebreakDecision);
+          setPrevRoundsTiebreakResolvedDecision((msg as any).prevRoundsTiebreakDecision);
+          if ((msg as any).prevRoundsTiebreakDecision === 'no') {
+            setTimeTiebreakIsResolved(false);
+          }
+        }
+        if (typeof (msg as any).prevRoundsTiebreakFingerprint === 'string') {
+          const fingerprint = (msg as any).prevRoundsTiebreakFingerprint;
+          setPrevRoundsTiebreakResolvedFingerprint(fingerprint);
+          setTimeTiebreakCurrentFingerprint(fingerprint);
+          setTimeTiebreakHasEligibleTie(true);
+          if (
+            (msg as any).prevRoundsTiebreakDecision === 'yes' ||
+            (msg as any).prevRoundsTiebreakDecision === 'no'
+          ) {
+            setPrevRoundsTiebreakDecisions((prev) => ({
+              ...prev,
+              [fingerprint]: (msg as any).prevRoundsTiebreakDecision,
+            }));
+          }
+          if (Array.isArray((msg as any).prevRoundsTiebreakOrder)) {
+            const order = ((msg as any).prevRoundsTiebreakOrder as unknown[])
+              .map((item) => (typeof item === 'string' ? item.trim() : ''))
+              .filter((item, idx, arr) => !!item && arr.indexOf(item) === idx);
+            if (order.length > 0) {
+              setPrevRoundsTiebreakOrders((prev) => ({
+                ...prev,
+                [fingerprint]: order,
+              }));
+            }
+          }
+          if (
+            (msg as any).prevRoundsTiebreakRanksByName &&
+            typeof (msg as any).prevRoundsTiebreakRanksByName === 'object'
+          ) {
+            const ranks = Object.entries(
+              (msg as any).prevRoundsTiebreakRanksByName as Record<string, unknown>,
+            ).reduce((acc, [name, rank]) => {
+              if (typeof name !== 'string' || !name.trim()) return acc;
+              const num = Number(rank);
+              if (!Number.isFinite(num) || num <= 0) return acc;
+              acc[name.trim()] = Math.trunc(num);
+              return acc;
+            }, {} as Record<string, number>);
+            if (Object.keys(ranks).length > 0) {
+              setPrevRoundsTiebreakRanks((prev) => ({
+                ...prev,
+                [fingerprint]: ranks,
+              }));
+            }
+          }
         }
       }
       // Route init resets queue, progress, and timer to the preset value.
@@ -1191,23 +1340,11 @@ const ContestPage: FC = () => {
         console.log('End detection:', boxAfter.routeIndex, totalRoutes, allMarked);
         if (boxAfter && boxAfter.routeIndex === totalRoutes && allMarked) {
           setFinalized(true);
-          // Salvează top-3 concurenți în localStorage pentru Award Ceremony
-          const { rankPoints, nCompetitors } = calcRankPointsPerRoute(
-            updatedRanking,
-            totalRoutes,
+          const rankedRows = [...leadRankingRows].sort(
+            (a, b) => a.rank - b.rank || a.name.localeCompare(b.name),
           );
-          const rows = Object.keys(rankPoints).map((nume) => {
-            const rp = rankPoints[nume];
-            const raw = updatedRanking[nume] || [];
-            const total = geomMean(rp, totalRoutes, nCompetitors);
-            return { nume, rp, raw, total };
-          });
-          rows.sort((a, b) => {
-            if (a.total !== b.total) return a.total - b.total;
-            return a.nume.localeCompare(b.nume, undefined, { sensitivity: 'base' });
-          });
-          const podium = rows.slice(0, 3).map((c, i) => ({
-            name: c.nume,
+          const podium = rankedRows.slice(0, 3).map((c, i) => ({
+            name: c.name,
             color: ['#ffd700', '#c0c0c0', '#cd7f32'][i], // aur, argint, bronz
           }));
           safeSetItem(`podium-${boxId}`, JSON.stringify(podium));
@@ -1236,6 +1373,23 @@ const ContestPage: FC = () => {
                 clubs: clubMap,
                 times: updatedTimes,
                 use_time_tiebreak: timeCriterionEnabled,
+                route_index: Math.max(1, Number(boxAfter.routeIndex) || totalRoutes),
+                holds_counts: Array.isArray(boxAfter.holdsCounts) ? boxAfter.holdsCounts : [],
+                active_holds_count:
+                  Array.isArray(boxAfter.holdsCounts) && Number(boxAfter.routeIndex) > 0
+                    ? boxAfter.holdsCounts[Math.max(0, Number(boxAfter.routeIndex) - 1)] ?? boxAfter.holdsCount
+                    : boxAfter.holdsCount,
+                box_id: Number(boxId),
+                time_tiebreak_decisions: timeTiebreakDecisions,
+                time_tiebreak_resolved_decision: timeTiebreakResolvedDecision,
+                time_tiebreak_resolved_fingerprint: timeTiebreakResolvedFingerprint,
+                time_tiebreak_preference: timeTiebreakPreference,
+                prev_rounds_tiebreak_decisions: prevRoundsTiebreakDecisions,
+                prev_rounds_tiebreak_orders: prevRoundsTiebreakOrders,
+                prev_rounds_tiebreak_ranks_by_fingerprint: prevRoundsTiebreakRanks,
+                prev_rounds_tiebreak_resolved_decision: prevRoundsTiebreakResolvedDecision,
+                prev_rounds_tiebreak_resolved_fingerprint: prevRoundsTiebreakResolvedFingerprint,
+                prev_rounds_tiebreak_preference: prevRoundsTiebreakPreference,
               }),
             })
               .then((r) => r.json())
@@ -1257,6 +1411,20 @@ const ContestPage: FC = () => {
     preparing,
     remaining,
     timeCriterionEnabled,
+    timeTiebreakPreference,
+    prevRoundsTiebreakPreference,
+    timeTiebreakCurrentFingerprint,
+    timeTiebreakHasEligibleTie,
+    timeTiebreakIsResolved,
+    timeTiebreakDecisions,
+    prevRoundsTiebreakDecisions,
+    prevRoundsTiebreakOrders,
+    prevRoundsTiebreakRanks,
+    prevRoundsTiebreakResolvedFingerprint,
+    prevRoundsTiebreakResolvedDecision,
+    timeTiebreakResolvedFingerprint,
+    timeTiebreakResolvedDecision,
+    leadRankingRows,
     broadcastRemaining,
     getTimerPreset,
     routeIdx,
