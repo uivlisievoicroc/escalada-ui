@@ -96,11 +96,13 @@ type PublicBox = {
   prevRoundsTiebreakPreference?: 'yes' | 'no' | null;
   prevRoundsTiebreakDecisions?: Record<string, 'yes' | 'no'>;
   prevRoundsTiebreakOrders?: Record<string, string[]>;
+  prevRoundsTiebreakLineageRanks?: Record<string, Record<string, number>>;
   prevRoundsTiebreakResolvedFingerprint?: string | null;
   prevRoundsTiebreakResolvedDecision?: 'yes' | 'no' | null;
   timeTiebreakCurrentFingerprint?: string | null;
   timeTiebreakHasEligibleTie?: boolean;
   timeTiebreakIsResolved?: boolean;
+  leadTieEvents?: Array<Record<string, any>>;
   leadRankingRows?: Array<{
     name: string;
     rank: number;
@@ -126,10 +128,183 @@ type PublicBox = {
 type RankingRow = {
   rank: number;  // Final rank (1, 2, 3, ...)
   nume: string;  // Competitor name
-  total: number;  // Geometric mean rank
+      total: number;  // Geometric mean rank
   scores: Array<number | undefined>;  // Raw scores per route
   tbTime: boolean;
   tbPrev: boolean;
+};
+
+type TieBreakKind = 'time' | 'prev';
+
+type HelperMember = {
+  name: string;
+  holdsLabel: string;
+  timeLabel: string;
+  prevRank: number | null;
+};
+
+type HelperInfo = {
+  kind: TieBreakKind;
+  athleteName: string;
+  members: HelperMember[];
+  rank: number;
+  fallbackNote: string | null;
+};
+
+type ActiveHelper = {
+  key: string;
+  boxId: number;
+  athleteName: string;
+  kind: TieBreakKind;
+  info: HelperInfo;
+};
+
+type DerivedPerformance = {
+  key: string;
+  holdsLabel: string;
+};
+
+const sha1Hex = (input: string): string => {
+  const msg = unescape(encodeURIComponent(input));
+  const words: number[] = [];
+  for (let i = 0; i < msg.length; i += 1) {
+    words[i >> 2] = (words[i >> 2] || 0) | (msg.charCodeAt(i) << (24 - (i % 4) * 8));
+  }
+  words[msg.length >> 2] = (words[msg.length >> 2] || 0) | (0x80 << (24 - (msg.length % 4) * 8));
+  words[(((msg.length + 8) >> 6) + 1) * 16 - 1] = msg.length * 8;
+
+  const rotateLeft = (n: number, s: number) => (n << s) | (n >>> (32 - s));
+  let h0 = 0x67452301;
+  let h1 = 0xefcdab89;
+  let h2 = 0x98badcfe;
+  let h3 = 0x10325476;
+  let h4 = 0xc3d2e1f0;
+
+  for (let i = 0; i < words.length; i += 16) {
+    const w = new Array<number>(80);
+    for (let t = 0; t < 16; t += 1) w[t] = words[i + t] || 0;
+    for (let t = 16; t < 80; t += 1) {
+      w[t] = rotateLeft((w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16]) | 0, 1);
+    }
+
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+
+    for (let t = 0; t < 80; t += 1) {
+      let f = 0;
+      let k = 0;
+      if (t < 20) {
+        f = (b & c) | (~b & d);
+        k = 0x5a827999;
+      } else if (t < 40) {
+        f = b ^ c ^ d;
+        k = 0x6ed9eba1;
+      } else if (t < 60) {
+        f = (b & c) | (b & d) | (c & d);
+        k = 0x8f1bbcdc;
+      } else {
+        f = b ^ c ^ d;
+        k = 0xca62c1d6;
+      }
+      const temp = (rotateLeft(a, 5) + f + e + k + w[t]) | 0;
+      e = d;
+      d = c;
+      c = rotateLeft(b, 30);
+      b = a;
+      a = temp;
+    }
+
+    h0 = (h0 + a) | 0;
+    h1 = (h1 + b) | 0;
+    h2 = (h2 + c) | 0;
+    h3 = (h3 + d) | 0;
+    h4 = (h4 + e) | 0;
+  }
+
+  const toHex = (n: number) => (n >>> 0).toString(16).padStart(8, '0');
+  return `${toHex(h0)}${toHex(h1)}${toHex(h2)}${toHex(h3)}${toHex(h4)}`;
+};
+
+const stableStringify = (value: unknown): string => {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+};
+
+const formatSeconds = (raw: unknown): string => {
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  const total = Math.trunc(seconds);
+  const mm = Math.floor(total / 60)
+    .toString()
+    .padStart(2, '0');
+  const ss = (total % 60).toString().padStart(2, '0');
+  return `${mm}:${ss}`;
+};
+
+const getActiveRouteIndex = (box: PublicBox): number => Math.max(1, Number(box.routeIndex || 1));
+
+const getActiveHoldsCount = (box: PublicBox): number | null => {
+  const routeIdx = getActiveRouteIndex(box) - 1;
+  if (Array.isArray(box.holdsCounts) && routeIdx >= 0 && routeIdx < box.holdsCounts.length) {
+    const val = Number(box.holdsCounts[routeIdx]);
+    return Number.isFinite(val) && val > 0 ? Math.trunc(val) : null;
+  }
+  const fallback = Number(box.holdsCount);
+  return Number.isFinite(fallback) && fallback > 0 ? Math.trunc(fallback) : null;
+};
+
+const getRouteScore = (box: PublicBox, athleteName: string): number | null => {
+  const routeIdx = getActiveRouteIndex(box) - 1;
+  const arr = box.scoresByName?.[athleteName];
+  if (!Array.isArray(arr) || routeIdx < 0 || routeIdx >= arr.length) return null;
+  const val = Number(arr[routeIdx]);
+  return Number.isFinite(val) ? val : null;
+};
+
+const getRouteTime = (box: PublicBox, athleteName: string): number | null => {
+  const routeIdx = getActiveRouteIndex(box) - 1;
+  const arr = box.timesByName?.[athleteName];
+  if (!Array.isArray(arr) || routeIdx < 0 || routeIdx >= arr.length) return null;
+  const val = Number(arr[routeIdx]);
+  return Number.isFinite(val) ? val : null;
+};
+
+const derivePerformance = (score: number | null, activeHoldsCount: number | null): DerivedPerformance | null => {
+  if (score == null || !Number.isFinite(score)) return null;
+  if (activeHoldsCount != null && score >= activeHoldsCount) {
+    return {
+      key: `t:1|h:${activeHoldsCount}|p:0`,
+      holdsLabel: `TOP (${activeHoldsCount})`,
+    };
+  }
+  const hold = Math.floor(Math.max(0, score));
+  const plus = score - hold > 1e-9;
+  return {
+    key: `t:0|h:${hold}|p:${plus ? 1 : 0}`,
+    holdsLabel: plus ? `${hold}+` : `${hold}`,
+  };
+};
+
+const buildLineagePayload = (box: PublicBox, perf: DerivedPerformance): string => {
+  const parts = perf.key.split('|');
+  const topped = parts[0] === 't:1';
+  const hold = Number(parts[1]?.replace('h:', '') || '0');
+  const plus = parts[2] === 'p:1';
+  return stableStringify({
+    round: `Final|route:${getActiveRouteIndex(box)}`,
+    context: 'overall',
+    performance: {
+      topped,
+      hold,
+      plus,
+    },
+  });
 };
 
 /**
@@ -156,7 +331,9 @@ const buildRankingRows = (box: PublicBox): RankingRow[] => {
           : typeof row.score === 'number'
           ? row.score
           : 0,
-      scores: Array.isArray(row.raw_scores) ? row.raw_scores : [],
+      scores: Array.isArray(row.raw_scores)
+        ? row.raw_scores.map((score) => (typeof score === 'number' ? score : undefined))
+        : [],
       tbTime: !!row.tb_time,
       tbPrev: !!row.tb_prev,
     }))
@@ -199,11 +376,14 @@ const PublicRankings: FC = () => {
   const [connected, setConnected] = useState(false);  // WebSocket connected
   const [error, setError] = useState<string | null>(null);  // Error message
   const [reconnectAttempts, setReconnectAttempts] = useState(0);  // For UI (not used currently)
+  const [activeHelper, setActiveHelper] = useState<ActiveHelper | null>(null);
 
   // Refs: Lifecycle management (persistent across renders, no re-render on change)
   const wsRef = useRef<WebSocket | null>(null);  // WebSocket instance
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);  // Reconnect timer
   const reconnectAttemptsRef = useRef(0);  // Attempt count (for async callbacks)
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   /**
    * fetchInitialData - HTTP Fallback for Initial Rankings
@@ -418,6 +598,178 @@ const PublicRankings: FC = () => {
   const selectedBox = initiatedBoxes.find((b) => b.boxId === selectedBoxId);  // Current box
   const rankings = selectedBox ? buildRankingRows(selectedBox) : [];  // Rankings for selected box
 
+  const buildHelperInfo = useCallback(
+    (box: PublicBox, row: RankingRow, kind: TieBreakKind): HelperInfo => {
+      const activeHoldsCount = getActiveHoldsCount(box);
+      const allRows = buildRankingRows(box);
+      const targetScore = getRouteScore(box, row.nume);
+      const targetPerf = derivePerformance(targetScore, activeHoldsCount);
+      if (!targetPerf) {
+        return {
+          kind,
+          athleteName: row.nume,
+          members: [
+            {
+              name: row.nume,
+              holdsLabel: '—',
+              timeLabel: formatSeconds(getRouteTime(box, row.nume)),
+              prevRank: null,
+            },
+          ],
+          rank: row.rank,
+          fallbackNote:
+            'Persistent badge from an earlier tie-break. Current-route performance cannot be fully reconstructed.',
+        };
+      }
+
+      const tiedMembers: Array<{
+        name: string;
+        holdsLabel: string;
+        timeLabel: string;
+        prevRank: null;
+        rank: number;
+      }> = [];
+      for (const candidate of allRows) {
+        const score = getRouteScore(box, candidate.nume);
+        const perf = derivePerformance(score, activeHoldsCount);
+        if (!perf || perf.key !== targetPerf.key) continue;
+        tiedMembers.push({
+          name: candidate.nume,
+          holdsLabel: perf.holdsLabel,
+          timeLabel: formatSeconds(getRouteTime(box, candidate.nume)),
+          prevRank: null,
+          rank: candidate.rank,
+        });
+      }
+      const members: HelperMember[] = tiedMembers
+        .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name))
+        .map(({ rank: _rank, ...rest }) => rest);
+
+      if (kind === 'time') {
+        return {
+          kind,
+          athleteName: row.nume,
+          members,
+          rank: row.rank,
+          fallbackNote: null,
+        };
+      }
+
+      const payload = buildLineagePayload(box, targetPerf);
+      const lineageKey = `tb-lineage:${sha1Hex(payload)}`;
+      const lineageMap =
+        box.prevRoundsTiebreakLineageRanks &&
+        typeof box.prevRoundsTiebreakLineageRanks === 'object'
+          ? box.prevRoundsTiebreakLineageRanks[lineageKey]
+          : null;
+      const fallbackEvent = Array.isArray(box.leadTieEvents)
+        ? box.leadTieEvents.find((ev) => {
+            if (!ev || typeof ev !== 'object') return false;
+            const stage = String((ev as any).stage || '');
+            if (stage !== 'previous_rounds') return false;
+            const eventMembers = Array.isArray((ev as any).members)
+              ? (ev as any).members
+                  .map((m: any) => (typeof m?.name === 'string' ? m.name : ''))
+                  .filter((n: string) => !!n)
+              : [];
+            return eventMembers.includes(row.nume);
+          })
+        : null;
+      const fallbackRanks =
+        fallbackEvent && typeof (fallbackEvent as any).known_prev_ranks_by_name === 'object'
+          ? ((fallbackEvent as any).known_prev_ranks_by_name as Record<string, number>)
+          : null;
+      const prevRanks = lineageMap || fallbackRanks || null;
+
+      const withPrev = members.map((member) => ({
+        ...member,
+        prevRank:
+          prevRanks && Number.isFinite(Number(prevRanks[member.name]))
+            ? Math.trunc(Number(prevRanks[member.name]))
+            : null,
+      }));
+
+      return {
+        kind,
+        athleteName: row.nume,
+        members: withPrev,
+        rank: row.rank,
+        fallbackNote:
+          prevRanks == null
+            ? 'Historical tie-break data is not available in this snapshot.'
+            : null,
+      };
+    },
+    [],
+  );
+
+  const toggleHelper = useCallback(
+    (
+      box: PublicBox,
+      row: RankingRow,
+      kind: TieBreakKind,
+      event: React.MouseEvent<HTMLButtonElement>,
+    ) => {
+      const key = `${box.boxId}:${row.nume}:${kind}`;
+      if (activeHelper?.key === key) {
+        setActiveHelper(null);
+        return;
+      }
+      try {
+        const info = buildHelperInfo(box, row, kind);
+        triggerRef.current = event.currentTarget;
+        setActiveHelper({
+          key,
+          boxId: box.boxId,
+          athleteName: row.nume,
+          kind,
+          info,
+        });
+      } catch (err) {
+        console.error('Failed to build tie-break helper:', err);
+      }
+    },
+    [activeHelper?.key, buildHelperInfo],
+  );
+
+  useEffect(() => {
+    if (!activeHelper) return;
+    const closeOnOutside = (e: MouseEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (popoverRef.current?.contains(target)) return;
+      if (triggerRef.current?.contains(target)) return;
+      setActiveHelper(null);
+    };
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setActiveHelper(null);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener('mousedown', closeOnOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [activeHelper]);
+
+  useEffect(() => {
+    if (!activeHelper) return;
+    if (activeHelper.boxId !== selectedBoxId) {
+      setActiveHelper(null);
+      return;
+    }
+    const stillVisible = rankings.some(
+      (row) =>
+        row.nume === activeHelper.athleteName &&
+        ((activeHelper.kind === 'time' && row.tbTime) || (activeHelper.kind === 'prev' && row.tbPrev)),
+    );
+    if (!stillVisible) {
+      setActiveHelper(null);
+    }
+  }, [activeHelper, rankings, selectedBoxId]);
+
   // Navigation handler
   const handleBack = () => {
     navigate('/public');  // Return to Public Hub
@@ -501,13 +853,13 @@ const PublicRankings: FC = () => {
           </div>
         ) : (
           // Rankings table: Display all competitors with geometric mean totals
-          <div className="bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden">
+          <div className="bg-slate-800/50 rounded-xl border border-slate-700">
             <table className="w-full">
               {/* Table header: 3 columns (rank, name, total) */}
               <thead>
                 <tr className="bg-slate-700/50 text-left">
                   <th className="px-4 py-3 text-slate-300 font-medium w-16">#</th>
-                  <th className="px-4 py-3 text-slate-300 font-medium">Nume</th>
+                  <th className="px-4 py-3 text-slate-300 font-medium">Name</th>
                   <th className="px-4 py-3 text-slate-300 font-medium text-right">Total</th>
                 </tr>
               </thead>
@@ -530,14 +882,32 @@ const PublicRankings: FC = () => {
                       <div className="flex items-center gap-2">
                         <span>{row.nume}</span>
                         {row.tbTime && (
-                          <span className="inline-flex items-center rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-200">
-                            TB Time
-                          </span>
+                          <div className="relative">
+                            <button
+                              type="button"
+                              className="inline-flex items-center rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-200 hover:bg-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-400/50"
+                              aria-expanded={activeHelper?.key === `${selectedBox.boxId}:${row.nume}:time`}
+                              aria-controls="tb-popover-centered"
+                              aria-label={`TB Time details for ${row.nume}`}
+                              onClick={(event) => void toggleHelper(selectedBox, row, 'time', event)}
+                            >
+                              TB Time
+                            </button>
+                          </div>
                         )}
                         {row.tbPrev && (
-                          <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
-                            TB Prev
-                          </span>
+                          <div className="relative">
+                            <button
+                              type="button"
+                              className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200 hover:bg-amber-500/20 focus:outline-none focus:ring-2 focus:ring-amber-400/50"
+                              aria-expanded={activeHelper?.key === `${selectedBox.boxId}:${row.nume}:prev`}
+                              aria-controls="tb-popover-centered"
+                              aria-label={`TB Prev details for ${row.nume}`}
+                              onClick={(event) => void toggleHelper(selectedBox, row, 'prev', event)}
+                            >
+                              TB Prev
+                            </button>
+                          </div>
                         )}
                       </div>
                     </td>
@@ -552,6 +922,70 @@ const PublicRankings: FC = () => {
           </div>
         )}
       </main>
+
+      {activeHelper && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-950/45" />
+          <div
+            id="tb-popover-centered"
+            ref={popoverRef}
+            className={`relative w-full max-w-xl rounded-xl border p-4 shadow-2xl ${
+              activeHelper.info.kind === 'time'
+                ? 'border-cyan-500/50 bg-slate-950/95'
+                : 'border-amber-500/50 bg-slate-950/95'
+            }`}
+          >
+            {activeHelper.info.kind === 'time' ? (
+              <>
+                <div className="text-sm font-semibold text-cyan-200">
+                  Time tie-break for rank {activeHelper.info.rank}
+                </div>
+                <div className="mt-1 text-xs text-slate-300">
+                  Athletes are tied on current-route performance. Tie was resolved by recorded time (lower is
+                  better).
+                </div>
+                <div className="mt-3 space-y-1.5">
+                  {activeHelper.info.members.map((member) => (
+                    <div
+                      key={`tb-time-center-${member.name}`}
+                      className="grid grid-cols-[1fr_auto_auto] gap-2 text-xs text-slate-200"
+                    >
+                      <span>{member.name}</span>
+                      <span>Holds {member.holdsLabel}</span>
+                      <span>Time {member.timeLabel}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-sm font-semibold text-amber-200">
+                  Previous-rounds tie-break for rank {activeHelper.info.rank}
+                </div>
+                <div className="mt-1 text-xs text-slate-300">
+                  Athletes are tied on current-route performance. Tie was resolved using previous-round ranking.
+                </div>
+                <div className="mt-3 space-y-1.5">
+                  {activeHelper.info.members.map((member) => (
+                    <div
+                      key={`tb-prev-center-${member.name}`}
+                      className="grid grid-cols-[1fr_auto_auto_auto] gap-2 text-xs text-slate-200"
+                    >
+                      <span>{member.name}</span>
+                      <span>Holds {member.holdsLabel}</span>
+                      <span>Time {member.timeLabel}</span>
+                      <span>Prev rank {typeof member.prevRank === 'number' ? member.prevRank : '—'}</span>
+                    </div>
+                  ))}
+                </div>
+                {activeHelper.info.fallbackNote && (
+                  <div className="mt-2 text-xs text-slate-300">{activeHelper.info.fallbackNote}</div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

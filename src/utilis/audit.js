@@ -3,6 +3,16 @@ import { fetchWithRetry } from './fetch';
 const API_PROTOCOL = window.location.protocol === 'https:' ? 'https' : 'http';
 const API_BASE = `${API_PROTOCOL}://${window.location.hostname}:8000/api/admin`;
 
+/**
+ * @typedef {Object} FetchAuditEventsOptions
+ * @property {number | null | undefined} [boxId]
+ * @property {number} [limit]
+ * @property {boolean} [includePayload]
+ */
+
+/**
+ * @param {FetchAuditEventsOptions} [options]
+ */
 export async function fetchAuditEvents({ boxId, limit = 200, includePayload = false } = {}) {
   const params = new URLSearchParams();
   if (boxId !== undefined && boxId !== null && boxId !== '') params.set('boxId', String(boxId));

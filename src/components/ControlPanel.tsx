@@ -104,6 +104,7 @@ type TimeTiebreakSnapshot = {
   prevDecisions: Record<string, TimeTiebreakDecision>;
   prevOrders: Record<string, string[]>;
   prevRanks: Record<string, Record<string, number>>;
+  prevLineageRanks: Record<string, Record<string, number>>;
   resolvedFingerprint: string | null;
   resolvedDecision: TimeTiebreakDecision | null;
   prevResolvedFingerprint: string | null;
@@ -536,6 +537,12 @@ const ControlPanel: FC = () => {
     boxId: number,
   ): string => `${boxId}:${stage}:${fingerprint}`;
 
+  const prevRoundsDraftKey = (
+    boxId: number,
+    fingerprint: string,
+    lineageKey?: string | null,
+  ): string => `${boxId}:${(lineageKey || fingerprint).trim()}`;
+
   const clearPrevRoundsDraftsForBox = (boxId: number): void => {
     Object.keys(prevRoundsRankDraftsRef.current).forEach((key) => {
       if (key.startsWith(`${boxId}:`)) {
@@ -657,6 +664,34 @@ const ControlPanel: FC = () => {
       ...(existingSnapshot?.prevRanks ?? {}),
       ...prevRanksFromSnapshot,
     };
+    const prevLineageRanksFromSnapshot: Record<string, Record<string, number>> = {};
+    if (
+      msg.prevRoundsTiebreakLineageRanks &&
+      typeof msg.prevRoundsTiebreakLineageRanks === 'object'
+    ) {
+      Object.entries(msg.prevRoundsTiebreakLineageRanks as Record<string, unknown>).forEach(
+        ([lineageKey, ranks]) => {
+          if (!lineageKey || !ranks || typeof ranks !== 'object') return;
+          const normalized = Object.entries(ranks as Record<string, unknown>).reduce(
+            (acc, [name, rank]) => {
+              if (typeof name !== 'string' || !name.trim()) return acc;
+              const num = Number(rank);
+              if (!Number.isFinite(num) || num <= 0) return acc;
+              acc[name.trim()] = Math.trunc(num);
+              return acc;
+            },
+            {} as Record<string, number>,
+          );
+          if (Object.keys(normalized).length > 0) {
+            prevLineageRanksFromSnapshot[lineageKey] = normalized;
+          }
+        },
+      );
+    }
+    const mergedPrevLineageRanks: Record<string, Record<string, number>> = {
+      ...(existingSnapshot?.prevLineageRanks ?? {}),
+      ...prevLineageRanksFromSnapshot,
+    };
     const hasTieSnapshotPayload =
       Array.isArray(msg.leadTieEvents) ||
       Array.isArray(msg.timeTiebreakEligibleGroups) ||
@@ -719,6 +754,37 @@ const ControlPanel: FC = () => {
                 return acc;
               }, {} as Record<string, number>)
             : null;
+        const lineageKey =
+          typeof raw.lineage_key === 'string'
+            ? raw.lineage_key
+            : typeof raw.lineageKey === 'string'
+            ? raw.lineageKey
+            : null;
+        const knownPrevRanksRaw = (raw.known_prev_ranks_by_name ??
+          raw.knownPrevRanksByName) as Record<string, unknown> | undefined;
+        const knownPrevRanksByName =
+          knownPrevRanksRaw && typeof knownPrevRanksRaw === 'object'
+            ? Object.entries(knownPrevRanksRaw).reduce((acc, [name, rank]) => {
+                if (typeof name !== 'string' || !name.trim()) return acc;
+                const num = Number(rank);
+                if (!Number.isFinite(num) || num <= 0) return acc;
+                acc[name.trim()] = Math.trunc(num);
+                return acc;
+              }, {} as Record<string, number>)
+            : null;
+        const missingPrevRoundsMembers = Array.isArray(
+          raw.missing_prev_rounds_members ?? raw.missingPrevRoundsMembers,
+        )
+          ? ((raw.missing_prev_rounds_members ?? raw.missingPrevRoundsMembers) as unknown[])
+              .map((item) => (typeof item === 'string' ? item.trim() : ''))
+              .filter((item, idx, arr) => !!item && arr.indexOf(item) === idx)
+          : [];
+        const requiresPrevRoundsInput =
+          typeof raw.requires_prev_rounds_input === 'boolean'
+            ? raw.requires_prev_rounds_input
+            : typeof raw.requiresPrevRoundsInput === 'boolean'
+            ? raw.requiresPrevRoundsInput
+            : missingPrevRoundsMembers.length > 0;
         return {
           context:
             raw.context === 'route' || raw.context === 'overall'
@@ -741,6 +807,13 @@ const ControlPanel: FC = () => {
             prevRanksNormalized && Object.keys(prevRanksNormalized).length > 0
               ? prevRanksNormalized
               : null,
+          lineageKey,
+          knownPrevRanksByName:
+            knownPrevRanksByName && Object.keys(knownPrevRanksByName).length > 0
+              ? knownPrevRanksByName
+              : null,
+          missingPrevRoundsMembers,
+          requiresPrevRoundsInput,
           timeDecision: timeDecisionRaw,
           resolvedDecision: timeDecisionRaw,
           resolutionKind:
@@ -792,6 +865,7 @@ const ControlPanel: FC = () => {
         prevDecisions: mergedPrevDecisions,
         prevOrders: mergedPrevOrders,
         prevRanks: mergedPrevRanks,
+        prevLineageRanks: mergedPrevLineageRanks,
         resolvedFingerprint: resolvedFingerprint ?? prev[boxId]?.resolvedFingerprint ?? null,
         resolvedDecision: resolvedDecision ?? prev[boxId]?.resolvedDecision ?? null,
         prevResolvedFingerprint:
@@ -895,6 +969,10 @@ const ControlPanel: FC = () => {
     ranksByName: Record<string, number> = {},
   ): Promise<void> => {
     if (!activeTimeTiebreakPrompt || activeTimeTiebreakPrompt.stage !== 'previous-rounds') return;
+    const lineageKey =
+      typeof activeTimeTiebreakPrompt.group?.lineageKey === 'string'
+        ? activeTimeTiebreakPrompt.group.lineageKey
+        : null;
     try {
       setTimeTiebreakDecisionBusy(true);
       setTimeTiebreakDecisionError(null);
@@ -902,10 +980,15 @@ const ControlPanel: FC = () => {
         activeTimeTiebreakPrompt.boxId,
         decision,
         activeTimeTiebreakPrompt.fingerprint,
+        lineageKey,
         order,
         ranksByName,
       );
-      const draftKey = `${activeTimeTiebreakPrompt.boxId}:${activeTimeTiebreakPrompt.fingerprint}`;
+      const draftKey = prevRoundsDraftKey(
+        activeTimeTiebreakPrompt.boxId,
+        activeTimeTiebreakPrompt.fingerprint,
+        lineageKey,
+      );
       delete prevRoundsRankDraftsRef.current[draftKey];
       setTimeTiebreakByBox((prev) => {
         const existing = prev[activeTimeTiebreakPrompt.boxId];
@@ -919,6 +1002,9 @@ const ControlPanel: FC = () => {
         const nextPrevRanks: Record<string, Record<string, number>> = {
           ...(existing?.prevRanks ?? {}),
         };
+        const nextPrevLineageRanks: Record<string, Record<string, number>> = {
+          ...(existing?.prevLineageRanks ?? {}),
+        };
         if (decision === 'yes' && order.length > 0) {
           nextPrevOrders[activeTimeTiebreakPrompt.fingerprint] = order;
         } else {
@@ -926,6 +1012,12 @@ const ControlPanel: FC = () => {
         }
         if (decision === 'yes' && Object.keys(ranksByName).length > 0) {
           nextPrevRanks[activeTimeTiebreakPrompt.fingerprint] = ranksByName;
+          if (lineageKey) {
+            nextPrevLineageRanks[lineageKey] = {
+              ...(nextPrevLineageRanks[lineageKey] ?? {}),
+              ...ranksByName,
+            };
+          }
         } else {
           delete nextPrevRanks[activeTimeTiebreakPrompt.fingerprint];
         }
@@ -933,11 +1025,18 @@ const ControlPanel: FC = () => {
           existing?.eligibleGroups?.map((group) => {
             if (group.fingerprint !== activeTimeTiebreakPrompt.fingerprint) return group;
             if (decision === 'yes') {
+              const mergedKnownRanks = {
+                ...(group.knownPrevRanksByName ?? group.prevRoundsRanksByName ?? {}),
+                ...ranksByName,
+              };
               return {
                 ...group,
                 prevRoundsDecision: 'yes' as const,
                 prevRoundsOrder: order,
-                prevRoundsRanksByName: ranksByName,
+                prevRoundsRanksByName: mergedKnownRanks,
+                knownPrevRanksByName: mergedKnownRanks,
+                missingPrevRoundsMembers: [],
+                requiresPrevRoundsInput: false,
                 resolutionKind: 'previous_rounds' as const,
                 isResolved: true,
               };
@@ -962,6 +1061,7 @@ const ControlPanel: FC = () => {
             prevDecisions: nextPrevDecisions,
             prevOrders: nextPrevOrders,
             prevRanks: nextPrevRanks,
+            prevLineageRanks: nextPrevLineageRanks,
             resolvedFingerprint: existing?.resolvedFingerprint ?? null,
             resolvedDecision: existing?.resolvedDecision ?? null,
             prevResolvedFingerprint: activeTimeTiebreakPrompt.fingerprint,
@@ -997,14 +1097,27 @@ const ControlPanel: FC = () => {
     setTimeTiebreakDecisionError(null);
     setTimeTiebreakDecisionBusy(false);
     if (activeTimeTiebreakPrompt?.stage === 'previous-rounds' && activeTimeTiebreakGroup) {
-      const draftKey = `${activeTimeTiebreakPrompt.boxId}:${activeTimeTiebreakPrompt.fingerprint}`;
+      const draftKey = prevRoundsDraftKey(
+        activeTimeTiebreakPrompt.boxId,
+        activeTimeTiebreakPrompt.fingerprint,
+        activeTimeTiebreakGroup.lineageKey ?? null,
+      );
       const draftInputs = prevRoundsRankDraftsRef.current[draftKey];
-      const names = activeTimeTiebreakGroup.members
+      const allNames = activeTimeTiebreakGroup.members
         .map((member) => member.name)
         .filter((name, idx, arr) => !!name && arr.indexOf(name) === idx);
-      const existingMap = activeTimeTiebreakGroup.prevRoundsRanksByName ?? {};
+      const missing = Array.isArray(activeTimeTiebreakGroup.missingPrevRoundsMembers)
+        ? activeTimeTiebreakGroup.missingPrevRoundsMembers
+            .map((name) => (typeof name === 'string' ? name.trim() : ''))
+            .filter((name, idx, arr) => !!name && arr.indexOf(name) === idx)
+        : [];
+      const inputNames = missing.length > 0 ? missing : allNames;
+      const existingMap =
+        activeTimeTiebreakGroup.knownPrevRanksByName ??
+        activeTimeTiebreakGroup.prevRoundsRanksByName ??
+        {};
       const nextInputs: Record<string, string> = {};
-      names.forEach((name) => {
+      inputNames.forEach((name) => {
         const draftValue = draftInputs?.[name];
         const existingValue = existingMap[name];
         if (typeof draftValue === 'string') {
@@ -1027,13 +1140,32 @@ const ControlPanel: FC = () => {
     activeTimeTiebreakGroup,
   ]);
 
-  const activePrevRoundNames =
+  const activePrevRoundAllNames =
     activeTimeTiebreakPrompt?.stage === 'previous-rounds' && activeTimeTiebreakGroup
       ? activeTimeTiebreakGroup.members
           .map((member) => member.name)
           .filter((name, index, arr) => !!name && arr.indexOf(name) === index)
       : [];
-  const parsedPrevRoundsRanksByName = activePrevRoundNames.reduce((acc, name) => {
+  const activePrevRoundInputNames =
+    activeTimeTiebreakPrompt?.stage === 'previous-rounds' && activeTimeTiebreakGroup
+      ? Array.isArray(activeTimeTiebreakGroup.missingPrevRoundsMembers) &&
+        activeTimeTiebreakGroup.missingPrevRoundsMembers.length > 0
+        ? activeTimeTiebreakGroup.missingPrevRoundsMembers
+            .map((name) => (typeof name === 'string' ? name.trim() : ''))
+            .filter((name, index, arr) => !!name && arr.indexOf(name) === index)
+        : activePrevRoundAllNames
+      : [];
+  const activePrevRoundKnownRanks =
+    activeTimeTiebreakPrompt?.stage === 'previous-rounds' && activeTimeTiebreakGroup
+      ? activeTimeTiebreakGroup.knownPrevRanksByName ??
+        activeTimeTiebreakGroup.prevRoundsRanksByName ??
+        {}
+      : {};
+  const activePrevRoundReadOnlyNames = activePrevRoundAllNames.filter(
+    (name) => !activePrevRoundInputNames.includes(name),
+  );
+  const activePrevRoundInputNameSet = new Set(activePrevRoundInputNames);
+  const parsedPrevRoundsRanksByName = activePrevRoundInputNames.reduce((acc, name) => {
     const raw = prevRoundsRankInputs[name];
     const num = Number(raw);
     if (Number.isFinite(num) && num > 0) {
@@ -1042,8 +1174,8 @@ const ControlPanel: FC = () => {
     return acc;
   }, {} as Record<string, number>);
   const canSubmitPrevRoundsOrder =
-    activePrevRoundNames.length > 0 &&
-    activePrevRoundNames.every((name) => {
+    activePrevRoundInputNames.length > 0 &&
+    activePrevRoundInputNames.every((name) => {
       const raw = prevRoundsRankInputs[name];
       const num = Number(raw);
       return Number.isFinite(num) && num > 0;
@@ -1052,7 +1184,11 @@ const ControlPanel: FC = () => {
   const updatePrevRoundsRankInput = (name: string, value: string): void => {
     setPrevRoundsRankInputs((prev) => ({ ...prev, [name]: value }));
     if (!activeTimeTiebreakPrompt || activeTimeTiebreakPrompt.stage !== 'previous-rounds') return;
-    const draftKey = `${activeTimeTiebreakPrompt.boxId}:${activeTimeTiebreakPrompt.fingerprint}`;
+    const draftKey = prevRoundsDraftKey(
+      activeTimeTiebreakPrompt.boxId,
+      activeTimeTiebreakPrompt.fingerprint,
+      activeTimeTiebreakGroup?.lineageKey ?? null,
+    );
     const existing = prevRoundsRankDraftsRef.current[draftKey] ?? {};
     prevRoundsRankDraftsRef.current[draftKey] = {
       ...existing,
@@ -1239,6 +1375,7 @@ const ControlPanel: FC = () => {
                       prevDecisions: existing?.prevDecisions ?? {},
                       prevOrders: existing?.prevOrders ?? {},
                       prevRanks: existing?.prevRanks ?? {},
+                      prevLineageRanks: existing?.prevLineageRanks ?? {},
                       resolvedFingerprint: fingerprint,
                       resolvedDecision: decision,
                       prevResolvedFingerprint: existing?.prevResolvedFingerprint ?? null,
@@ -1285,6 +1422,11 @@ const ControlPanel: FC = () => {
                       {} as Record<string, number>,
                     )
                   : {};
+              const lineageKey =
+                typeof (msg as any).prevRoundsTiebreakLineageKey === 'string' &&
+                (msg as any).prevRoundsTiebreakLineageKey.trim()
+                  ? (msg as any).prevRoundsTiebreakLineageKey.trim()
+                  : null;
               if (decision && fingerprint) {
                 setTimeTiebreakByBox((prev) => {
                   const existing = prev[idx];
@@ -1298,6 +1440,9 @@ const ControlPanel: FC = () => {
                   const nextPrevRanks: Record<string, Record<string, number>> = {
                     ...(existing?.prevRanks ?? {}),
                   };
+                  const nextPrevLineageRanks: Record<string, Record<string, number>> = {
+                    ...(existing?.prevLineageRanks ?? {}),
+                  };
                   if (decision === 'yes' && order.length > 0) {
                     nextPrevOrders[fingerprint] = order;
                   } else {
@@ -1305,6 +1450,12 @@ const ControlPanel: FC = () => {
                   }
                   if (decision === 'yes' && Object.keys(ranksByName).length > 0) {
                     nextPrevRanks[fingerprint] = ranksByName;
+                    if (lineageKey) {
+                      nextPrevLineageRanks[lineageKey] = {
+                        ...(nextPrevLineageRanks[lineageKey] ?? {}),
+                        ...ranksByName,
+                      };
+                    }
                   } else {
                     delete nextPrevRanks[fingerprint];
                   }
@@ -1312,11 +1463,18 @@ const ControlPanel: FC = () => {
                     existing?.eligibleGroups?.map((group) => {
                       if (group.fingerprint !== fingerprint) return group;
                       if (decision === 'yes') {
+                        const mergedKnownRanks = {
+                          ...(group.knownPrevRanksByName ?? group.prevRoundsRanksByName ?? {}),
+                          ...ranksByName,
+                        };
                         return {
                           ...group,
                           prevRoundsDecision: 'yes' as const,
                           prevRoundsOrder: order,
-                          prevRoundsRanksByName: ranksByName,
+                          prevRoundsRanksByName: mergedKnownRanks,
+                          knownPrevRanksByName: mergedKnownRanks,
+                          missingPrevRoundsMembers: [],
+                          requiresPrevRoundsInput: false,
                           resolutionKind: 'previous_rounds' as const,
                           isResolved: true,
                         };
@@ -1339,6 +1497,7 @@ const ControlPanel: FC = () => {
                       prevDecisions: nextPrevDecisions,
                       prevOrders: nextPrevOrders,
                       prevRanks: nextPrevRanks,
+                      prevLineageRanks: nextPrevLineageRanks,
                       resolvedFingerprint: existing?.resolvedFingerprint ?? null,
                       resolvedDecision: existing?.resolvedDecision ?? null,
                       prevResolvedFingerprint: fingerprint,
@@ -2337,6 +2496,7 @@ const ControlPanel: FC = () => {
           prevDecisions: {},
           prevOrders: {},
           prevRanks: {},
+          prevLineageRanks: {},
           resolvedFingerprint: null,
           resolvedDecision: null,
           prevResolvedFingerprint: null,
@@ -3088,6 +3248,7 @@ const ControlPanel: FC = () => {
           prev_rounds_tiebreak_decisions: tiebreakState?.prevDecisions ?? {},
           prev_rounds_tiebreak_orders: tiebreakState?.prevOrders ?? {},
           prev_rounds_tiebreak_ranks_by_fingerprint: tiebreakState?.prevRanks ?? {},
+          prev_rounds_tiebreak_lineage_ranks_by_key: tiebreakState?.prevLineageRanks ?? {},
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -3964,88 +4125,138 @@ const ControlPanel: FC = () => {
               </div>
             </div>
             <div className={styles.modalContent}>
-              <div className={styles.modalAlert}>
-                {activeTimeTiebreakPrompt.stage === 'previous-rounds'
-                  ? activeTimeTiebreakGroup?.affectsPodium
-                    ? 'Eligible tie detected in top 3. Enter previous-round ranks to resolve.'
-                    : 'Tie detected. Enter previous-round ranks to resolve.'
-                  : 'Time tiebreak is applied automatically (YES by default).'}
-              </div>
-              {activeTimeTiebreakGroup && (
-                <div className={styles.modalField}>
-                  <div
-                    style={{
-                      border: '1px solid var(--border-medium)',
-                      borderRadius: 'var(--radius-md)',
-                      padding: '10px 12px',
-                      background: 'rgba(0, 0, 0, 0.25)',
-                    }}
-                  >
+              <div
+                style={{
+                  maxHeight: '52vh',
+                  overflowY: 'auto',
+                  paddingRight: '4px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '12px',
+                }}
+              >
+                <div className={styles.modalAlert}>
+                  {activeTimeTiebreakPrompt.stage === 'previous-rounds'
+                    ? activeTimeTiebreakGroup?.affectsPodium
+                      ? 'Eligible tie detected in top 3. Enter previous-round ranks to resolve.'
+                      : 'Tie detected. Enter previous-round ranks to resolve.'
+                    : 'Time tiebreak is applied automatically (YES by default).'}
+                </div>
+                {activeTimeTiebreakGroup && (
+                  <div className={styles.modalField}>
                     <div
                       style={{
-                        fontSize: '12px',
-                        fontWeight: 600,
-                        color: 'var(--text-secondary)',
-                        marginBottom: '8px',
+                        border: '1px solid var(--border-medium)',
+                        borderRadius: 'var(--radius-md)',
+                        padding: '10px 12px',
+                        background: 'rgba(0, 0, 0, 0.25)',
                       }}
                     >
-                      {activeTimeTiebreakGroup.context === 'overall' ? 'Overall' : 'Active route'} tie on rank{' '}
-                      {activeTimeTiebreakGroup.rank}
+                      <div
+                        style={{
+                          fontSize: '12px',
+                          fontWeight: 600,
+                          color: 'var(--text-secondary)',
+                          marginBottom: '8px',
+                        }}
+                      >
+                        {activeTimeTiebreakGroup.context === 'overall' ? 'Overall' : 'Active route'} tie on rank{' '}
+                        {activeTimeTiebreakGroup.rank}
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        {activeTimeTiebreakGroup.members.map((member) => (
+                          <div
+                            key={`${activeTimeTiebreakGroup.context}-${activeTimeTiebreakGroup.rank}-${member.name}`}
+                            style={{
+                              display: 'grid',
+                              gridTemplateColumns: 'minmax(120px,1fr) auto auto',
+                              gap: '8px',
+                              fontSize: '13px',
+                              color: 'var(--text-primary)',
+                            }}
+                          >
+                            <span
+                              style={
+                                activeTimeTiebreakPrompt.stage === 'previous-rounds' &&
+                                activePrevRoundInputNameSet.has(member.name)
+                                  ? { color: '#f59e0b', fontWeight: 700 }
+                                  : undefined
+                              }
+                            >
+                              {sanitizeCompetitorName(member.name)}
+                            </span>
+                            <span style={{ color: 'var(--text-secondary)' }}>
+                              {`Nr. of Holds ${
+                                typeof member.value === 'number'
+                                  ? Number.isInteger(member.value)
+                                    ? member.value.toFixed(0)
+                                    : member.value.toFixed(1)
+                                  : '—'
+                              }`}
+                            </span>
+                            <span style={{ color: 'var(--text-secondary)', textAlign: 'right' }}>
+                              Time {formatRegisteredSeconds(member.time)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      {activeTimeTiebreakGroup.members.map((member) => (
-                        <div
-                          key={`${activeTimeTiebreakGroup.context}-${activeTimeTiebreakGroup.rank}-${member.name}`}
-                          style={{
-                            display: 'grid',
-                            gridTemplateColumns: 'minmax(120px,1fr) auto auto',
-                            gap: '8px',
-                            fontSize: '13px',
-                            color: 'var(--text-primary)',
-                          }}
-                        >
-                          <span>{sanitizeCompetitorName(member.name)}</span>
-                          <span style={{ color: 'var(--text-secondary)' }}>
-                            {activeTimeTiebreakGroup.context === 'overall'
-                              ? `Total ${typeof member.value === 'number' ? member.value.toFixed(3) : '—'}`
-                              : `Score ${typeof member.value === 'number' ? member.value.toFixed(1) : '—'}`}
+                  </div>
+                )}
+                {activeTimeTiebreakPrompt.stage === 'previous-rounds' && (
+                  <div className={styles.modalField}>
+                    <div className={styles.modalLabel}>
+                      Set previous-round rank for each newly tied athlete (1 = best)
+                    </div>
+                    {activePrevRoundReadOnlyNames.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
+                        {activePrevRoundReadOnlyNames.map((name) => (
+                          <div
+                            key={`prev-rank-known-${name}`}
+                            style={{
+                              display: 'grid',
+                              gridTemplateColumns: 'minmax(120px,1fr) auto',
+                              gap: '8px',
+                              fontSize: '13px',
+                              color: 'var(--text-secondary)',
+                            }}
+                          >
+                            <span>{sanitizeCompetitorName(name)}</span>
+                            <span>
+                              Previous rank:{' '}
+                              {typeof activePrevRoundKnownRanks[name] === 'number'
+                                ? activePrevRoundKnownRanks[name]
+                                : '—'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {activePrevRoundInputNames.map((name) => (
+                        <label key={`prev-rank-${name}`} className={styles.modalField}>
+                          <span className={styles.modalLabel} style={{ color: '#f59e0b' }}>
+                            {sanitizeCompetitorName(name)}
                           </span>
-                          <span style={{ color: 'var(--text-secondary)', textAlign: 'right' }}>
-                            Time {formatRegisteredSeconds(member.time)}
-                          </span>
-                        </div>
+                          <input
+                            className={styles.modalInput}
+                            type="number"
+                            min={1}
+                            step={1}
+                            placeholder="Rank (e.g. 1, 2, 2)"
+                            value={prevRoundsRankInputs[name] ?? ''}
+                            onChange={(e) => updatePrevRoundsRankInput(name, e.target.value)}
+                            disabled={timeTiebreakDecisionBusy}
+                          />
+                        </label>
                       ))}
                     </div>
                   </div>
-                </div>
-              )}
-              {activeTimeTiebreakPrompt.stage === 'previous-rounds' && (
-                <div className={styles.modalField}>
-                  <div className={styles.modalLabel}>
-                    Set previous-round rank for each tied athlete (1 = best)
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {activePrevRoundNames.map((name) => (
-                      <label key={`prev-rank-${name}`} className={styles.modalField}>
-                        <span className={styles.modalLabel}>{sanitizeCompetitorName(name)}</span>
-                        <input
-                          className={styles.modalInput}
-                          type="number"
-                          min={1}
-                          step={1}
-                          placeholder="Rank (e.g. 1, 2, 2)"
-                          value={prevRoundsRankInputs[name] ?? ''}
-                          onChange={(e) => updatePrevRoundsRankInput(name, e.target.value)}
-                          disabled={timeTiebreakDecisionBusy}
-                        />
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {timeTiebreakDecisionError && (
-                <div className={styles.modalAlertError}>{timeTiebreakDecisionError}</div>
-              )}
+                )}
+                {timeTiebreakDecisionError && (
+                  <div className={styles.modalAlertError}>{timeTiebreakDecisionError}</div>
+                )}
+              </div>
               <div className={styles.modalActions}>
                 {activeTimeTiebreakPrompt.stage === 'previous-rounds' && (
                   <>

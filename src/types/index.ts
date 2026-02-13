@@ -109,6 +109,7 @@ export interface StateSnapshot {
   prevRoundsTiebreakDecisions?: Record<string, 'yes' | 'no'>;
   prevRoundsTiebreakOrders?: Record<string, string[]>;
   prevRoundsTiebreakRanks?: Record<string, Record<string, number>>;
+  prevRoundsTiebreakLineageRanks?: Record<string, Record<string, number>>;
   prevRoundsTiebreakResolvedFingerprint?: string | null;
   prevRoundsTiebreakResolvedDecision?: 'yes' | 'no' | null;
   timeTiebreakCurrentFingerprint?: string | null;
@@ -195,6 +196,7 @@ export interface ApiCommand {
   // SET_PREV_ROUNDS_TIEBREAK_DECISION fields
   prevRoundsTiebreakDecision?: 'yes' | 'no';
   prevRoundsTiebreakFingerprint?: string;
+  prevRoundsTiebreakLineageKey?: string;
   prevRoundsTiebreakOrder?: string[];
   prevRoundsTiebreakRanksByName?: Record<string, number>;
 }
@@ -227,6 +229,10 @@ export interface TimeTiebreakEligibleGroup {
   prevRoundsDecision?: 'yes' | 'no' | null;
   prevRoundsOrder?: string[] | null;
   prevRoundsRanksByName?: Record<string, number> | null;
+  lineageKey?: string | null;
+  knownPrevRanksByName?: Record<string, number> | null;
+  missingPrevRoundsMembers?: string[];
+  requiresPrevRoundsInput?: boolean;
   timeDecision?: 'yes' | 'no' | null;
   resolvedDecision?: 'yes' | 'no' | null;
   resolutionKind?: 'previous_rounds' | 'time' | null;

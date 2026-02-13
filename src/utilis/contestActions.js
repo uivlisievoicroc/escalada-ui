@@ -625,6 +625,7 @@ export async function setTimeTiebreakDecision(boxId, decision, fingerprint) {
  * @param {number} boxId
  * @param {'yes'|'no'} decision
  * @param {string} fingerprint
+ * @param {string | null | undefined} lineageKey
  * @param {string[]} order
  * @param {Record<string, number>} ranksByName
  * @throws {Error} If API request fails
@@ -633,12 +634,15 @@ export async function setPrevRoundsTiebreakDecision(
   boxId,
   decision,
   fingerprint,
+  lineageKey = null,
   order = [],
   ranksByName = {},
 ) {
   try {
     const normalizedDecision = String(decision || '').trim().toLowerCase();
     const normalizedFingerprint = String(fingerprint || '').trim();
+    const normalizedLineageKey =
+      typeof lineageKey === 'string' && lineageKey.trim() ? lineageKey.trim() : null;
     const normalizedOrder = Array.isArray(order)
       ? order
           .map((item) => (typeof item === 'string' ? item.trim() : ''))
@@ -666,6 +670,7 @@ export async function setPrevRoundsTiebreakDecision(
           type: 'SET_PREV_ROUNDS_TIEBREAK_DECISION',
           prevRoundsTiebreakDecision: normalizedDecision,
           prevRoundsTiebreakFingerprint: normalizedFingerprint,
+          prevRoundsTiebreakLineageKey: normalizedLineageKey,
           prevRoundsTiebreakOrder: normalizedOrder,
           prevRoundsTiebreakRanksByName: normalizedRanksByName,
           sessionId: getSessionId(boxId),
